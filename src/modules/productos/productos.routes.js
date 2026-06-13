@@ -1,0 +1,69 @@
+const router = require("express").Router();
+const { authenticate, requireEmpresa } = require("../../middlewares/auth.middleware");
+const { ok, created, notFound, badRequest } = require("../../utils/response");
+const svc = require("./productos.service");
+
+router.use(authenticate, requireEmpresa);
+
+router.get("/", async (req, res, next) => {
+  try {
+    return ok(res, await svc.listar(req.empresas_id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id", async (req, res, next) => {
+  try {
+    const p = await svc.obtener(Number(req.params.id), req.empresas_id);
+    if (!p) return notFound(res);
+    return ok(res, p);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/", async (req, res, next) => {
+  try {
+    const { nombre, descripcion, precio_venta } = req.body;
+    if (!nombre) return badRequest(res, "nombre es requerido.");
+    const p = await svc.crear(req.empresas_id, { nombre, descripcion, precio_venta });
+    return created(res, p);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/:id", async (req, res, next) => {
+  try {
+    const { nombre, descripcion, precio_venta, activo } = req.body;
+    const p = await svc.actualizar(Number(req.params.id), { nombre, descripcion, precio_venta, activo });
+    return ok(res, p);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id", async (req, res, next) => {
+  try {
+    await svc.eliminar(Number(req.params.id));
+    return ok(res, null, "Producto desactivado.");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── PUT /productos/:id/receta ─────────────────────────────────────────
+// Reemplaza la receta completa del producto
+router.put("/:id/receta", async (req, res, next) => {
+  try {
+    const { insumos } = req.body;
+    if (!Array.isArray(insumos)) return badRequest(res, "insumos debe ser un array.");
+    const receta = await svc.sincronizarReceta(Number(req.params.id), insumos);
+    return ok(res, receta);
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;

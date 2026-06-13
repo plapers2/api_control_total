@@ -1,0 +1,21 @@
+const prisma = require("../../db/prisma");
+
+const listar = async (empresasId) =>
+  prisma.insumos.findMany({
+    where: { empresas_id: empresasId },
+    orderBy: { nombre: "asc" },
+  });
+
+const obtener = async (id, empresasId) => prisma.insumos.findFirst({ where: { id, empresas_id: empresasId } });
+
+const crear = async (empresasId, data) => prisma.insumos.create({ data: { ...data, empresas_id: empresasId } });
+
+const actualizar = async (id, empresasId, data) =>
+  prisma.insumos.update({
+    where: { id },
+    data,
+  });
+
+const eliminar = async (id) => prisma.insumos.update({ where: { id }, data: { activo: false } });
+
+module.exports = { listar, obtener, crear, actualizar, eliminar };

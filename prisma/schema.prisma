@@ -1,0 +1,265 @@
+generator client {
+  provider   = "prisma-client-js"
+  output     = "../generated/prisma"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model empresas {
+  id                Int                 @id @default(autoincrement())
+  nombre            String              @db.VarChar(150)
+  descripcion       String?             @db.Text
+  activa            Boolean?            @default(true)
+  created_at        DateTime            @default(now()) @db.DateTime(0)
+  updated_at        DateTime            @default(now()) @updatedAt @db.DateTime(0)
+  insumos           insumos[]
+  lotes_produccion  lotes_produccion[]
+  productos         productos[]
+  usuarios_empresas usuarios_empresas[]
+  clientes          clientes[]
+  ventas            ventas[]
+  movimientos_caja  movimientos_caja[]
+}
+
+model insumos {
+  id                  Int                   @id @default(autoincrement())
+  empresas_id         Int
+  nombre              String                @db.VarChar(100)
+  unidad_medida       insumos_unidad_medida
+  stock_actual        Decimal?              @default(0.000) @db.Decimal(10, 3)
+  stock_minimo        Decimal?              @default(0.000) @db.Decimal(10, 3)
+  activo              Boolean?              @default(true)
+  precio_unidad       Decimal?              @default(0.00) @db.Decimal(10, 2)
+  created_at          DateTime              @default(now()) @db.DateTime(0)
+  updated_at          DateTime              @default(now()) @updatedAt @db.DateTime(0)
+  empresas            empresas              @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "insumos_ibfk_1")
+  movimientos_insumos movimientos_insumos[]
+  recetas             recetas[]
+
+  @@index([empresas_id], map: "fk_insumos_empresas")
+}
+
+model lotes_produccion {
+  id                     Int                      @id @default(autoincrement())
+  empresas_id            Int
+  usuarios_id            Int
+  fecha                  DateTime                 @db.Date
+  notas                  String?                  @db.Text
+  costo_total            Decimal?                 @default(0.00) @db.Decimal(10, 2)
+  created_at             DateTime                 @default(now()) @db.DateTime(0)
+  updated_at             DateTime                 @default(now()) @updatedAt @db.DateTime(0)
+  empresas               empresas                 @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "lotes_produccion_ibfk_3")
+  usuarios               usuarios                 @relation(fields: [usuarios_id], references: [id], onDelete: Cascade, map: "lotes_produccion_ibfk_4")
+  lotes_produccion_items lotes_produccion_items[]
+  movimientos_insumos    movimientos_insumos[]
+
+  @@index([empresas_id], map: "fk_lotes_empresas")
+  @@index([usuarios_id], map: "fk_lotes_usuarios")
+  @@index([fecha], map: "idx_lotes_fecha")
+}
+
+model lotes_produccion_items {
+  id                  Int              @id @default(autoincrement())
+  lotes_produccion_id Int
+  productos_id        Int
+  cantidad            Int
+  costo_unitario      Decimal          @default(0.00) @db.Decimal(10, 2)
+  lotes_produccion    lotes_produccion @relation(fields: [lotes_produccion_id], references: [id], onUpdate: Restrict, map: "fk_litems_lote")
+  productos           productos        @relation(fields: [productos_id], references: [id], onUpdate: Restrict, map: "fk_litems_producto")
+
+  @@index([lotes_produccion_id], map: "fk_litems_lote")
+  @@index([productos_id], map: "fk_litems_producto")
+}
+
+model movimientos_insumos {
+  id                  Int                      @id @default(autoincrement())
+  insumos_id          Int
+  lotes_produccion_id Int?
+  tipo                movimientos_insumos_tipo
+  cantidad            Decimal                  @db.Decimal(10, 3)
+  costo_total         Decimal?                 @db.Decimal(10, 2)
+  nota                String?                  @db.VarChar(255)
+  usuarios_id         Int                      @db.UnsignedInt
+  created_at          DateTime                 @default(now()) @db.DateTime(0)
+  insumos             insumos                  @relation(fields: [insumos_id], references: [id], onDelete: Cascade, map: "movimientos_insumos_ibfk_3")
+  lotes_produccion    lotes_produccion?        @relation(fields: [lotes_produccion_id], references: [id], map: "movimientos_insumos_ibfk_4")
+
+  @@index([insumos_id], map: "fk_movinsumos_insumo")
+  @@index([lotes_produccion_id], map: "fk_movinsumos_lote")
+}
+
+model productos {
+  id                     Int                      @id @default(autoincrement())
+  empresas_id            Int
+  nombre                 String                   @db.VarChar(100)
+  descripcion            String?                  @db.Text
+  precio_venta           Decimal                  @default(0.00) @db.Decimal(10, 2)
+  activo                 Boolean?                 @default(true)
+  stock_actual  Decimal  @default(0)
+  created_at             DateTime                 @default(now()) @db.DateTime(0)
+  updated_at             DateTime                 @default(now()) @updatedAt @db.DateTime(0)
+  lotes_produccion_items lotes_produccion_items[]
+  empresas               empresas                 @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "productos_ibfk_1")
+  recetas                recetas[]
+  ventas_items           ventas_items[]
+
+  @@index([empresas_id], map: "fk_productos_empresas")
+}
+
+model roles {
+  id                Int                 @id @default(autoincrement())
+  nombre            String              @unique(map: "nombre") @db.VarChar(50)
+  descripcion       String?             @db.VarChar(255)
+  usuarios_empresas usuarios_empresas[]
+}
+
+model usuarios {
+  id                Int                 @id @default(autoincrement())
+  nombre            String              @db.VarChar(100)
+  email             String              @unique(map: "email") @db.VarChar(150)
+  password          String              @db.VarChar(255)
+  activo            Boolean?            @default(true)
+  created_at        DateTime            @default(now()) @db.DateTime(0)
+  updated_at        DateTime            @default(now()) @updatedAt @db.DateTime(0)
+  lotes_produccion  lotes_produccion[]
+  usuarios_empresas usuarios_empresas[]
+  ventas            ventas[]
+  movimientos_caja  movimientos_caja[]
+}
+
+model usuarios_empresas {
+  id          Int      @id @default(autoincrement())
+  usuarios_id Int
+  empresas_id Int
+  roles_id    Int
+  activo      Boolean? @default(true)
+  created_at  DateTime @default(now()) @db.DateTime(0)
+  updated_at  DateTime @default(now()) @updatedAt @db.DateTime(0)
+  usuarios    usuarios @relation(fields: [usuarios_id], references: [id], onDelete: Cascade, map: "usuarios_empresas_ibfk_7")
+  empresas    empresas @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "usuarios_empresas_ibfk_8")
+  roles       roles    @relation(fields: [roles_id], references: [id], onDelete: Cascade, map: "usuarios_empresas_ibfk_9")
+
+  @@unique([usuarios_id, empresas_id], map: "usuario_empresa_UNIQUE")
+  @@index([empresas_id], map: "fk_ue_empresas")
+  @@index([roles_id], map: "fk_ue_roles")
+  @@index([usuarios_id], map: "fk_ue_usuarios")
+}
+
+model recetas {
+  id           Int       @id @default(autoincrement())
+  productos_id Int
+  insumos_id   Int
+  cantidad     Decimal   @db.Decimal(10, 3)
+  productos    productos @relation(fields: [productos_id], references: [id], onDelete: Cascade, map: "recetas_ibfk_1")
+  insumos      insumos   @relation(fields: [insumos_id], references: [id], onDelete: Cascade, map: "recetas_ibfk_2")
+
+  @@unique([productos_id, insumos_id], map: "receta_unique")
+  @@index([insumos_id], map: "fk_recetas_insumos")
+}
+
+model clientes {
+  id          Int      @id @default(autoincrement())
+  empresas_id Int
+  nombre      String   @db.VarChar(100)
+  telefono    String?  @db.VarChar(20)
+  direccion   String?  @db.VarChar(255)
+  notas       String?  @db.Text
+  activo      Boolean? @default(true)
+  created_at  DateTime @default(now()) @db.DateTime(0)
+  updated_at  DateTime @default(now()) @updatedAt @db.DateTime(0)
+  empresas    empresas @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "clientes_ibfk_1")
+  ventas      ventas[]
+
+  @@index([empresas_id], map: "fk_clientes_empresas")
+}
+
+model ventas {
+  id               Int                @id @default(autoincrement())
+  empresas_id      Int
+  usuarios_id      Int
+  clientes_id      Int?
+  canal            ventas_canal       @default(punto_venta)
+  total            Decimal            @default(0.00) @db.Decimal(10, 2)
+  notas            String?            @db.Text
+  fecha            DateTime           @db.Date
+  created_at       DateTime           @default(now()) @db.DateTime(0)
+  updated_at       DateTime           @default(now()) @updatedAt @db.DateTime(0)
+  empresas         empresas           @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "ventas_ibfk_1")
+  usuarios         usuarios           @relation(fields: [usuarios_id], references: [id], onDelete: Cascade, map: "ventas_ibfk_2")
+  clientes         clientes?          @relation(fields: [clientes_id], references: [id], map: "ventas_ibfk_3")
+  ventas_items     ventas_items[]
+  movimientos_caja movimientos_caja[]
+
+  @@index([empresas_id], map: "fk_ventas_empresas")
+  @@index([usuarios_id], map: "fk_ventas_usuarios")
+  @@index([clientes_id], map: "fk_ventas_clientes")
+}
+
+model ventas_items {
+  id              Int       @id @default(autoincrement())
+  ventas_id       Int
+  productos_id    Int
+  cantidad        Int
+  precio_unitario Decimal   @db.Decimal(10, 2)
+  subtotal        Decimal   @db.Decimal(10, 2)
+  ventas          ventas    @relation(fields: [ventas_id], references: [id], onDelete: Cascade, map: "ventas_items_ibfk_1")
+  productos       productos @relation(fields: [productos_id], references: [id], onDelete: Cascade, map: "ventas_items_ibfk_2")
+
+  @@index([ventas_id], map: "fk_ventaitems_ventas")
+  @@index([productos_id], map: "fk_ventaitems_productos")
+}
+
+model movimientos_caja {
+  id          Int                        @id @default(autoincrement())
+  empresas_id Int
+  usuarios_id Int
+  ventas_id   Int?
+  tipo        movimientos_caja_tipo
+  categoria   movimientos_caja_categoria
+  monto       Decimal                    @db.Decimal(10, 2)
+  descripcion String?                    @db.VarChar(255)
+  fecha       DateTime                   @db.Date
+  created_at  DateTime                   @default(now()) @db.DateTime(0)
+  empresas    empresas                   @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "movimientos_caja_ibfk_1")
+  usuarios    usuarios                   @relation(fields: [usuarios_id], references: [id], onDelete: Cascade, map: "movimientos_caja_ibfk_2")
+  ventas      ventas?                    @relation(fields: [ventas_id], references: [id], map: "movimientos_caja_ibfk_3")
+
+  @@index([empresas_id], map: "fk_movcaja_empresas")
+  @@index([usuarios_id], map: "fk_movcaja_usuarios")
+  @@index([ventas_id], map: "fk_movcaja_ventas")
+}
+
+enum insumos_unidad_medida {
+  kg
+  g
+  l
+  ml
+  unidad
+}
+
+enum movimientos_insumos_tipo {
+  entrada
+  salida
+  ajuste
+}
+
+enum ventas_canal {
+  punto_venta
+  domicilio
+  encargo
+}
+
+enum movimientos_caja_tipo {
+  ingreso
+  gasto
+}
+
+enum movimientos_caja_categoria {
+  venta
+  insumo
+  servicio
+  otro
+}
