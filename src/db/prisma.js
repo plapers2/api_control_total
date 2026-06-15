@@ -1,18 +1,21 @@
-const { PrismaClient } = require("../../generated/prisma");
-const { PrismaMariaDb } = require("@prisma/adapter-mariadb");
+import { PrismaClient } from "../../generated/prisma";
+import { PrismaMariaDb } from "@prisma/adapter-mariadb";
 
-const adapter = new PrismaMariaDb(process.env.DATABASE_URL);
+const adapter = new PrismaMariaDb({
+  host: process.env.DB_HOST || "127.0.0.1",
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+  connectionLimit: 5,
+  connectTimeout: 20000,
+});
 
-// ── Cliente único de Prisma ─────────────────────────────────────────
-// `omit` excluye campos sensibles de TODAS las queries por defecto.
-// Es el equivalente al defaultScope de Sequelize, pero centralizado aquí.
 const prisma = new PrismaClient({
   adapter,
   log: process.env.NODE_ENV === "development" ? ["query", "error", "warn"] : ["error"],
   omit: {
-    usuarios: {
-      password: true,
-    },
+    usuarios: { password: true },
   },
 });
 

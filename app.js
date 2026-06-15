@@ -3,18 +3,18 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 
-const prisma = require("./db/prisma");
-const errorHandler = require("./middlewares/errorHandler");
+const prisma = require("./src/db/prisma");
+const errorHandler = require("./src/middlewares/errorHandler");
 
 // ── Importar rutas de cada módulo ───────────────────────────────────
-const authRoutes = require("./modules/auth/auth.routes");
-const empresasRoutes = require("./modules/empresas/empresas.routes");
-const insumosRoutes = require("./modules/insumos/insumos.routes");
-const productosRoutes = require("./modules/productos/productos.routes");
-const produccionRoutes = require("./modules/produccion/produccion.routes");
-const clientesRoutes = require("./modules/clientes/clientes.routes");
-const ventasRoutes = require("./modules/ventas/ventas.routes");
-const cajaRoutes = require("./modules/caja/caja.routes");
+const authRoutes = require("./src/modules/auth/auth.routes");
+const empresasRoutes = require("./src/modules/empresas/empresas.routes");
+const insumosRoutes = require("./src/modules/insumos/insumos.routes");
+const productosRoutes = require("./src/modules/productos/productos.routes");
+const produccionRoutes = require("./src/modules/produccion/produccion.routes");
+const clientesRoutes = require("./src/modules/clientes/clientes.routes");
+const ventasRoutes = require("./src/modules/ventas/ventas.routes");
+const cajaRoutes = require("./src/modules/caja/caja.routes");
 
 const app = express();
 
