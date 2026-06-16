@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { authenticate, requireRol } from "../../middlewares/auth.middleware.js";
 import { ok, created, noContent, notFound, badRequest } from "../../utils/response.js";
-import empresasService from "./empresas.service.js";
+import * as empresasService from "./empresas.service.js";
 
 const router = Router();
 

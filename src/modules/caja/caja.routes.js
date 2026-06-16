@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, badRequest } from "../../utils/response.js";
-import svc from "./caja.service.js";
+import * as svc from "./caja.service.js";
 
 const router = Router();
 
