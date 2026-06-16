@@ -6,7 +6,15 @@ const listar = async (empresasId) =>
     orderBy: { nombre: "asc" },
   });
 
-const obtener = async (id, empresasId) => prisma.insumos.findFirst({ where: { id, empresas_id: empresasId, activo: true } });
+const obtener = async (id, empresasId) =>
+  prisma.insumos.findFirst({
+    where: { id, empresas_id: empresasId, activo: true },
+    include: {
+      recetas: {
+        include: { productos: true },
+      },
+    },
+  });
 
 const crear = async (empresasId, data) => prisma.insumos.create({ data: { ...data, empresas_id: empresasId } });
 
