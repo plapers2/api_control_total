@@ -1,5 +1,5 @@
-const jwt = require("jsonwebtoken");
-const prisma = require("../db/prisma");
+import jwt from "jsonwebtoken";
+import prisma from "../db/prisma.js";
 
 /**
  * Verifica el JWT y adjunta req.usuario.
@@ -83,4 +83,4 @@ const requireRol =
     next();
   };
 
-module.exports = { authenticate, requireEmpresa, requireRol };
+export { authenticate, requireEmpresa, requireRol };

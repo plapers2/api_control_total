@@ -1,7 +1,9 @@
-const router = require("express").Router();
-const { authenticate, requireEmpresa } = require("../../middlewares/auth.middleware");
-const { ok, created, notFound, badRequest } = require("../../utils/response");
-const svc = require("./insumos.service");
+import { Router } from "express";
+import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
+import { ok, created, notFound, badRequest } from "../../utils/response.js";
+import svc from "./insumos.service.js";
+
+const router = Router();
 
 router.use(authenticate, requireEmpresa);
 
@@ -60,4 +62,4 @@ router.delete("/:id", async (req, res, next) => {
   }
 });
 
-module.exports = router;
+export default router;

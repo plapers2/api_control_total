@@ -1,4 +1,4 @@
-const prisma = require("../../db/prisma");
+import prisma from "../../db/prisma.js";
 
 // ── GET /empresas ────────────────────────────────────────────────────
 // Lista las empresas a las que pertenece el usuario autenticado
@@ -111,12 +111,4 @@ const removerMiembro = async (empresasId, usuariosId) => {
   });
 };
 
-module.exports = {
-  listarMisEmpresas,
-  crearEmpresa,
-  obtenerEmpresa,
-  actualizarEmpresa,
-  listarMiembros,
-  agregarMiembro,
-  removerMiembro,
-};
+export { listarMisEmpresas, crearEmpresa, obtenerEmpresa, actualizarEmpresa, listarMiembros, agregarMiembro, removerMiembro };

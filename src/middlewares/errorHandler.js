@@ -1,4 +1,4 @@
-const { Prisma } = require("../../generated/prisma");
+import { Prisma } from "../../generated/prisma";
 
 /**
  * Middleware global de manejo de errores.
@@ -41,4 +41,4 @@ const errorHandler = (err, req, res, next) => {
   res.status(status).json({ message });
 };
 
-module.exports = errorHandler;
+export default errorHandler;

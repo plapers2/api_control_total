@@ -1,7 +1,9 @@
-const router = require("express").Router();
-const { authenticate, requireEmpresa } = require("../../middlewares/auth.middleware");
-const { ok, created, badRequest } = require("../../utils/response");
-const svc = require("./caja.service");
+import { Router } from "express";
+import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
+import { ok, created, badRequest } from "../../utils/response.js";
+import svc from "./caja.service.js";
+
+const router = Router();
 
 router.use(authenticate, requireEmpresa);
 
@@ -44,4 +46,4 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-module.exports = router;
+export default router;

@@ -1,4 +1,4 @@
-const prisma = require("../../db/prisma");
+import prisma from "../../db/prisma.js";
 
 const listar = async (empresasId) =>
   prisma.lotes_produccion.findMany({
@@ -142,4 +142,4 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
   });
 };
 
-module.exports = { listar, obtener, crear };
+export { listar, obtener, crear };

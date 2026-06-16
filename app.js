@@ -1,20 +1,20 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const morgan = require("morgan");
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import morgan from "morgan";
 
-const prisma = require("./src/db/prisma");
-const errorHandler = require("./src/middlewares/errorHandler");
+import prisma from "./src/db/prisma.js";
+import errorHandler from "./src/middlewares/errorHandler.js";
 
 // ── Importar rutas de cada módulo ───────────────────────────────────
-const authRoutes = require("./src/modules/auth/auth.routes");
-const empresasRoutes = require("./src/modules/empresas/empresas.routes");
-const insumosRoutes = require("./src/modules/insumos/insumos.routes");
-const productosRoutes = require("./src/modules/productos/productos.routes");
-const produccionRoutes = require("./src/modules/produccion/produccion.routes");
-const clientesRoutes = require("./src/modules/clientes/clientes.routes");
-const ventasRoutes = require("./src/modules/ventas/ventas.routes");
-const cajaRoutes = require("./src/modules/caja/caja.routes");
+import authRoutes from "./src/modules/auth/auth.routes.js";
+import empresasRoutes from "./src/modules/empresas/empresas.routes.js";
+import insumosRoutes from "./src/modules/insumos/insumos.routes.js";
+import productosRoutes from "./src/modules/productos/productos.routes.js";
+import produccionRoutes from "./src/modules/produccion/produccion.routes.js";
+import clientesRoutes from "./src/modules/clientes/clientes.routes.js";
+import ventasRoutes from "./src/modules/ventas/ventas.routes.js";
+import cajaRoutes from "./src/modules/caja/caja.routes.js";
 
 const app = express();
 
@@ -60,4 +60,4 @@ const PORT = process.env.PORT || 3000;
   }
 })();
 
-module.exports = app;
+export default app;

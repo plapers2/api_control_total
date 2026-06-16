@@ -1,4 +1,4 @@
-const prisma = require("../../db/prisma");
+import prisma from "../../db/prisma.js";
 
 const listar = async (empresasId) =>
   prisma.insumos.findMany({
@@ -18,4 +18,4 @@ const actualizar = async (id, empresasId, data) =>
 
 const eliminar = async (id) => prisma.insumos.update({ where: { id }, data: { activo: false } });
 
-module.exports = { listar, obtener, crear, actualizar, eliminar };
+export { listar, obtener, crear, actualizar, eliminar };

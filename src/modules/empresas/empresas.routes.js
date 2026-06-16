@@ -1,7 +1,9 @@
-const router = require("express").Router();
-const { authenticate, requireRol } = require("../../middlewares/auth.middleware");
-const { ok, created, noContent, notFound, badRequest } = require("../../utils/response");
-const empresasService = require("./empresas.service");
+import { Router } from "express";
+import { authenticate, requireRol } from "../../middlewares/auth.middleware.js";
+import { ok, created, noContent, notFound, badRequest } from "../../utils/response.js";
+import empresasService from "./empresas.service.js";
+
+const router = Router();
 
 router.use(authenticate);
 
@@ -96,4 +98,4 @@ router.delete("/:id/miembros/:userId", requireRol("admin"), async (req, res, nex
   }
 });
 
-module.exports = router;
+export default router;

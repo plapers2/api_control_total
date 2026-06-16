@@ -26,4 +26,4 @@ const paginate = (res, rows, count, page, limit) =>
     },
   });
 
-module.exports = { ok, created, noContent, notFound, badRequest, forbidden, paginate };
+export { ok, created, noContent, notFound, badRequest, forbidden, paginate };

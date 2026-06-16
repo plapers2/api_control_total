@@ -1,6 +1,6 @@
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const prisma = require("../../db/prisma");
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import prisma from "../../db/prisma.js";
 
 // ── Helper para generar el JWT ──────────────────────────────────────
 const generarToken = (payload) => jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
@@ -84,4 +84,4 @@ const obtenerPerfil = async (usuarioId) => {
   return { empresas: membresias };
 };
 
-module.exports = { registrar, login, seleccionarEmpresa, obtenerPerfil };
+export { registrar, login, seleccionarEmpresa, obtenerPerfil };

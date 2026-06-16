@@ -1,7 +1,9 @@
-const router = require("express").Router();
-const { authenticate } = require("../../middlewares/auth.middleware");
-const { ok, created, badRequest } = require("../../utils/response");
-const authService = require("./auth.service");
+import { Router } from "express";
+import { authenticate } from "../../middlewares/auth.middleware.js";
+import { ok, created, badRequest } from "../../utils/response.js";
+import authService from "./auth.service.js";
+
+const router = Router();
 
 // ── POST /auth/register ─────────────────────────────────────────────
 router.post("/register", async (req, res, next) => {
@@ -57,4 +59,4 @@ router.get("/me", authenticate, async (req, res, next) => {
   }
 });
 
-module.exports = router;
+export default router;
