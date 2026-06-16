@@ -2,14 +2,14 @@ import prisma from "../../db/prisma.js";
 
 const listar = async (empresasId) =>
   prisma.productos.findMany({
-    where: { empresas_id: empresasId },
+    where: { empresas_id: empresasId, activo: true },
     orderBy: { nombre: "asc" },
     include: { recetas: { include: { insumos: true } } },
   });
 
 const obtener = async (id, empresasId) =>
   prisma.productos.findFirst({
-    where: { id, empresas_id: empresasId },
+    where: { id, empresas_id: empresasId, activo: true },
     include: { recetas: { include: { insumos: true } } },
   });
 

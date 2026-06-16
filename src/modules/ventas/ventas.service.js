@@ -27,7 +27,7 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
     // Validar stock de cada producto
     for (const item of items) {
       const producto = await tx.productos.findFirst({
-        where: { id: item.productos_id, empresas_id: empresasId },
+        where: { id: item.productos_id, empresas_id: empresasId, activo: true },
       });
       if (!producto) throw new Error(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad) {

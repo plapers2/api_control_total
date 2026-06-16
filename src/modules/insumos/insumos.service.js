@@ -2,11 +2,11 @@ import prisma from "../../db/prisma.js";
 
 const listar = async (empresasId) =>
   prisma.insumos.findMany({
-    where: { empresas_id: empresasId },
+    where: { empresas_id: empresasId, activo: true },
     orderBy: { nombre: "asc" },
   });
 
-const obtener = async (id, empresasId) => prisma.insumos.findFirst({ where: { id, empresas_id: empresasId } });
+const obtener = async (id, empresasId) => prisma.insumos.findFirst({ where: { id, empresas_id: empresasId, activo: true } });
 
 const crear = async (empresasId, data) => prisma.insumos.create({ data: { ...data, empresas_id: empresasId } });
 

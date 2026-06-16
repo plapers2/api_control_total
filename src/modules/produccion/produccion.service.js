@@ -21,6 +21,7 @@ const obtener = async (id, empresasId) =>
   });
 
 const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_reales }) => {
+  console.log("insumos_reales recibidos:", JSON.stringify(insumos_reales));
   return prisma.$transaction(async (tx) => {
     let costoTotal = 0;
     const movimientos = [];
