@@ -27,10 +27,10 @@ router.get("/:id", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { fecha, notas, items } = req.body;
+    const { fecha, notas, items, insumos_reales } = req.body;
     if (!fecha || !Array.isArray(items) || !items.length) return badRequest(res, "fecha e items son requeridos.");
 
-    const lote = await svc.crear(req.empresas_id, req.usuario.id, { fecha, notas, items });
+    const lote = await svc.crear(req.empresas_id, req.usuario.id, { fecha, notas, items, insumos_reales });
     return created(res, lote);
   } catch (err) {
     if (err.message?.includes("insuficiente") || err.message?.includes("Stock")) {
