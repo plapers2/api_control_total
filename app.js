@@ -24,7 +24,7 @@ app.use(express.json());
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 // ── Rutas ────────────────────────────────────────────────────────────
-const API = "/api/v1";
+const API = "/api";
 app.use(`${API}/auth`, authRoutes);
 app.use(`${API}/empresas`, empresasRoutes);
 app.use(`${API}/insumos`, insumosRoutes);
