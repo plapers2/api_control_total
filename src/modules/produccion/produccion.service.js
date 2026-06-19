@@ -1,15 +1,33 @@
 import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
+import { calcularRangoPeriodo } from "../../utils/periodo.js";
 
-const listar = async (empresasId) =>
-  prisma.lotes_produccion.findMany({
-    where: { empresas_id: empresasId },
-    orderBy: { fecha: "desc" },
-    include: {
-      usuarios: true,
-      lotes_produccion_items: { include: { productos: true } },
-    },
-  });
+const listar = async (empresasId, { periodo = "dia", page = 1, limit = 10 } = {}) => {
+  const { desde, hasta } = calcularRangoPeriodo(periodo);
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const where = {
+    empresas_id: empresasId,
+    anulado: false,
+    fecha: { gte: desde, lte: hasta },
+  };
+
+  const [data, total] = await Promise.all([
+    prisma.lotes_produccion.findMany({
+      where,
+      orderBy: { fecha: "desc" },
+      skip,
+      take: Number(limit),
+      include: {
+        usuarios: true,
+        lotes_produccion_items: { include: { productos: true } },
+      },
+    }),
+    prisma.lotes_produccion.count({ where }),
+  ]);
+
+  return { rows: data, count: total };
+};
 
 const obtener = async (id, empresasId) =>
   prisma.lotes_produccion.findFirst({
