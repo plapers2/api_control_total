@@ -1,27 +1,22 @@
 import prisma from "../../db/prisma.js";
-import { calcularRangoPeriodo } from "../../utils/periodo.js";
 
-const listar = async (empresasId, { periodo = "dia", page = 1, limit = 10 } = {}) => {
-  const { desde, hasta } = calcularRangoPeriodo(periodo);
+const listar = async (empresasId, { page = 1, limit = 10 } = {}) => {
   const skip = (Number(page) - 1) * Number(limit);
 
   const where = {
     empresas_id: empresasId,
-    fecha: { gte: desde, lte: hasta },
+    activo: true,
   };
 
   const [rows, count] = await Promise.all([
-    prisma.lotes_produccion.findMany({
+    prisma.productos.findMany({
       where,
-      orderBy: [{ fecha: "desc" }, { created_at: "desc" }],
+      orderBy: { nombre: "asc" },
       skip,
       take: Number(limit),
-      include: {
-        usuarios: true,
-        lotes_produccion_items: { include: { productos: true } },
-      },
+      include: { recetas: { include: { insumos: true } } },
     }),
-    prisma.lotes_produccion.count({ where }),
+    prisma.productos.count({ where }),
   ]);
 
   return { rows, count };
