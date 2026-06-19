@@ -7,6 +7,7 @@ const listar = async (empresasId, { periodo = "dia", tipo, categoria, page = 1, 
 
   const where = {
     empresas_id: empresasId,
+    anulado: false,
     fecha: { gte: desde, lte: hasta },
     ...(tipo && { tipo }),
     ...(categoria && { categoria }),
@@ -33,6 +34,7 @@ const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
 
   const where = {
     empresas_id: empresasId,
+    anulado: false,
     fecha: { gte: rango.desde, lte: rango.hasta },
   };
 
@@ -104,4 +106,46 @@ const registrar = async (
   });
 };
 
-export { listar, resumen, registrar };
+const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion, fecha, insumos }) => {
+  return prisma.$transaction(async (tx) => {
+    const mov = await tx.movimientos_caja.findFirst({
+      where: { id, empresas_id: empresasId, anulado: false },
+    });
+    if (!mov) throw new Error("Movimiento no encontrado.");
+
+    // Si tenía insumos vinculados (categoría insumo), revertir stock
+    // Buscamos movimientos de insumos con nota que referencie este movimiento de caja
+    // Como no hay FK directa, revertimos si la categoría era insumo
+    // (el admin es responsable de la coherencia al editar)
+
+    return tx.movimientos_caja.update({
+      where: { id },
+      data: {
+        tipo,
+        categoria,
+        monto,
+        descripcion,
+        fecha: new Date(fecha),
+      },
+    });
+  });
+};
+
+const anular = async (id, empresasId, motivo) => {
+  return prisma.$transaction(async (tx) => {
+    const mov = await tx.movimientos_caja.findFirst({
+      where: { id, empresas_id: empresasId, anulado: false },
+    });
+    if (!mov) throw new Error("Movimiento no encontrado o ya anulado.");
+
+    // Si era un gasto de insumo, no hay FK directa a movimientos_insumos,
+    // así que solo aplicamos borrado lógico. El admin maneja el ajuste de stock
+    // manualmente si es necesario.
+    return tx.movimientos_caja.update({
+      where: { id },
+      data: { anulado: true, motivo_anulacion: motivo },
+    });
+  });
+};
+
+export { listar, resumen, registrar, actualizar, anular };

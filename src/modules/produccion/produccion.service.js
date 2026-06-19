@@ -143,4 +143,133 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
   });
 };
 
-export { listar, obtener, crear };
+const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_reales }) => {
+  return prisma.$transaction(async (tx) => {
+    const lote = await tx.lotes_produccion.findFirst({
+      where: { id, empresas_id: empresasId, anulado: false },
+      include: {
+        lotes_produccion_items: true,
+        movimientos_insumos: true,
+      },
+    });
+    if (!lote) throw new Error("Lote no encontrado.");
+
+    // Revertir stock de productos producidos anteriormente
+    for (const item of lote.lotes_produccion_items) {
+      await tx.productos.update({
+        where: { id: item.productos_id },
+        data: { stock_actual: { decrement: item.cantidad } },
+      });
+    }
+
+    // Devolver insumos consumidos anteriormente
+    for (const mov of lote.movimientos_insumos) {
+      if (mov.tipo === "salida") {
+        await tx.insumos.update({
+          where: { id: mov.insumos_id },
+          data: { stock_actual: { increment: Number(mov.cantidad) } },
+        });
+      }
+    }
+
+    // Borrar items y movimientos anteriores
+    await tx.lotes_produccion_items.deleteMany({ where: { lotes_produccion_id: id } });
+    await tx.movimientos_insumos.deleteMany({ where: { lotes_produccion_id: id } });
+
+    // Recalcular con los nuevos datos (misma lógica que crear)
+    let costoTotal = 0;
+    const movimientos = [];
+
+    if (insumos_reales?.length) {
+      for (const ir of insumos_reales) {
+        const insumo = await tx.insumos.findUnique({ where: { id: ir.insumos_id } });
+        if (!insumo) continue;
+        if (Number(insumo.stock_actual) < Number(ir.cantidad))
+          throw new Error(`Insumo insuficiente: "${insumo.nombre}". Disponible: ${insumo.stock_actual}.`);
+      }
+      for (const ir of insumos_reales) {
+        if (!ir.cantidad || Number(ir.cantidad) <= 0) continue;
+        const insumo = await tx.insumos.findUnique({ where: { id: ir.insumos_id } });
+        if (!insumo) continue;
+        const costo = Number(ir.cantidad) * Number(insumo.precio_unidad ?? 0);
+        costoTotal += costo;
+        movimientos.push({
+          insumos_id: ir.insumos_id,
+          tipo: "salida",
+          cantidad: Number(ir.cantidad),
+          costo_total: costo,
+          nota: `Lote de produccion (editado)`,
+          usuarios_id: usuariosId,
+        });
+        await tx.insumos.update({
+          where: { id: ir.insumos_id },
+          data: { stock_actual: { decrement: Number(ir.cantidad) } },
+        });
+      }
+    }
+
+    // Crear nuevos items
+    await tx.lotes_produccion_items.createMany({
+      data: items.map((i) => ({
+        lotes_produccion_id: id,
+        productos_id: i.productos_id,
+        cantidad: i.cantidad,
+        costo_unitario: 0,
+      })),
+    });
+
+    if (movimientos.length) {
+      await tx.movimientos_insumos.createMany({
+        data: movimientos.map((m) => ({ ...m, lotes_produccion_id: id })),
+      });
+    }
+
+    // Sumar stock nuevo
+    for (const item of items) {
+      await tx.productos.update({
+        where: { id: item.productos_id },
+        data: { stock_actual: { increment: item.cantidad } },
+      });
+    }
+
+    return tx.lotes_produccion.update({
+      where: { id },
+      data: { notas, costo_total: costoTotal },
+    });
+  });
+};
+
+const anular = async (id, empresasId, motivo) => {
+  return prisma.$transaction(async (tx) => {
+    const lote = await tx.lotes_produccion.findFirst({
+      where: { id, empresas_id: empresasId, anulado: false },
+      include: { lotes_produccion_items: true, movimientos_insumos: true },
+    });
+    if (!lote) throw new Error("Lote no encontrado o ya anulado.");
+
+    // Revertir stock de productos
+    for (const item of lote.lotes_produccion_items) {
+      await tx.productos.update({
+        where: { id: item.productos_id },
+        data: { stock_actual: { decrement: item.cantidad } },
+      });
+    }
+
+    // Devolver insumos
+    for (const mov of lote.movimientos_insumos) {
+      if (mov.tipo === "salida") {
+        await tx.insumos.update({
+          where: { id: mov.insumos_id },
+          data: { stock_actual: { increment: Number(mov.cantidad) } },
+        });
+      }
+    }
+
+    return tx.lotes_produccion.update({
+      where: { id },
+      data: { anulado: true, motivo_anulacion: motivo },
+    });
+  });
+};
+
+export { listar, obtener, crear, actualizar, anular };

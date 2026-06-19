@@ -49,6 +49,8 @@ model lotes_produccion {
   fecha                  DateTime                 @db.Date
   notas                  String?                  @db.Text
   costo_total            Decimal?                 @default(0.00) @db.Decimal(10, 2)
+  anulado                Boolean                  @default(false)
+  motivo_anulacion       String?                  @db.VarChar(255)
   created_at             DateTime                 @default(now()) @db.DateTime(0)
   updated_at             DateTime                 @default(now()) @updatedAt @db.DateTime(0)
   empresas               empresas                 @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "lotes_produccion_ibfk_3")
@@ -187,6 +189,8 @@ model ventas {
   estado_pago      ventas_estado_pago @default(pagada)
   notas            String?            @db.Text
   fecha            DateTime           @db.Date
+  anulada          Boolean            @default(false)
+  motivo_anulacion String?            @db.VarChar(255)
   created_at       DateTime           @default(now()) @db.DateTime(0)
   updated_at       DateTime           @default(now()) @updatedAt @db.DateTime(0)
   empresas         empresas           @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "ventas_ibfk_1")
@@ -230,16 +234,18 @@ model pagos_venta {
 }
 
 model movimientos_caja {
-  id          Int                        @id @default(autoincrement())
-  empresas_id Int
-  usuarios_id Int
-  ventas_id   Int?
-  tipo        movimientos_caja_tipo
-  categoria   movimientos_caja_categoria
-  monto       Decimal                    @db.Decimal(10, 2)
-  descripcion String?                    @db.VarChar(255)
-  fecha       DateTime                   @db.Date
-  created_at  DateTime                   @default(now()) @db.DateTime(0)
+  id               Int                        @id @default(autoincrement())
+  empresas_id      Int
+  usuarios_id      Int
+  ventas_id        Int?
+  tipo             movimientos_caja_tipo
+  categoria        movimientos_caja_categoria
+  monto            Decimal                    @db.Decimal(10, 2)
+  descripcion      String?                    @db.VarChar(255)
+  fecha            DateTime                   @db.Date
+  anulado          Boolean                    @default(false)
+  motivo_anulacion String?                    @db.VarChar(255)
+  created_at       DateTime                   @default(now()) @db.DateTime(0)
   empresas    empresas                   @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "movimientos_caja_ibfk_1")
   usuarios    usuarios                   @relation(fields: [usuarios_id], references: [id], onDelete: Cascade, map: "movimientos_caja_ibfk_2")
   ventas      ventas?                    @relation(fields: [ventas_id], references: [id], map: "movimientos_caja_ibfk_3")

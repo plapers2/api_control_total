@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./caja.service.js";
+import { requireRol } from "../../middlewares/auth.middleware.js";
 
 const router = Router();
 
@@ -45,6 +46,28 @@ router.post("/", async (req, res, next) => {
         : undefined,
     });
     return created(res, mov);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/:id", requireRol("admin"), async (req, res, next) => {
+  try {
+    const { tipo, categoria, monto, descripcion, fecha } = req.body;
+    if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
+    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, { tipo, categoria, monto, descripcion, fecha });
+    return ok(res, mov);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id", requireRol("admin"), async (req, res, next) => {
+  try {
+    const { motivo } = req.body;
+    if (!motivo?.trim()) return badRequest(res, "El motivo de anulación es requerido.");
+    await svc.anular(Number(req.params.id), req.empresas_id, motivo);
+    return ok(res, null, "Movimiento anulado.");
   } catch (err) {
     next(err);
   }

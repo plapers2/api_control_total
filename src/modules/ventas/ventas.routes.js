@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./ventas.service.js";
+import { requireRol } from "../../middlewares/auth.middleware.js";
 
 const router = Router();
 router.use(authenticate, requireEmpresa);
@@ -46,6 +47,29 @@ router.post("/", async (req, res, next) => {
     if (err.message?.includes("insuficiente") || err.message?.includes("Stock")) {
       return badRequest(res, err.message);
     }
+    next(err);
+  }
+});
+
+router.put("/:id", requireRol("admin"), async (req, res, next) => {
+  try {
+    const { canal, notas, items } = req.body;
+    if (!Array.isArray(items) || !items.length) return badRequest(res, "items es requerido.");
+    const v = await svc.actualizar(Number(req.params.id), req.empresas_id, req.usuario.id, { canal, notas, items });
+    return ok(res, v);
+  } catch (err) {
+    if (err.message?.includes("insuficiente") || err.message?.includes("Stock")) return badRequest(res, err.message);
+    next(err);
+  }
+});
+
+router.delete("/:id", requireRol("admin"), async (req, res, next) => {
+  try {
+    const { motivo } = req.body;
+    if (!motivo?.trim()) return badRequest(res, "El motivo de anulación es requerido.");
+    await svc.anular(Number(req.params.id), req.empresas_id, req.usuario.id, motivo);
+    return ok(res, null, "Venta anulada.");
+  } catch (err) {
     next(err);
   }
 });
