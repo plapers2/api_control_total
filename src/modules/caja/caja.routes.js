@@ -1,17 +1,18 @@
 import { Router } from "express";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
-import { ok, created, badRequest } from "../../utils/response.js";
+import { ok, created, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./caja.service.js";
 
 const router = Router();
 
 router.use(authenticate, requireEmpresa);
 
-// GET /caja?fecha=2026-06-13&tipo=ingreso&categoria=venta
+// GET /caja?periodo=dia|semana|mes&tipo=ingreso&categoria=venta&page=1&limit=10
 router.get("/", async (req, res, next) => {
   try {
-    const { fecha, tipo, categoria } = req.query;
-    return ok(res, await svc.listar(req.empresas_id, { fecha, tipo, categoria }));
+    const { periodo, tipo, categoria, page, limit } = req.query;
+    const { rows, count } = await svc.listar(req.empresas_id, { periodo, tipo, categoria, page, limit });
+    return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {
     next(err);
   }
