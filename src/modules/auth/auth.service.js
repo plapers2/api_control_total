@@ -84,4 +84,62 @@ const obtenerPerfil = async (usuarioId) => {
   return { empresas: membresias };
 };
 
-export { registrar, login, seleccionarEmpresa, obtenerPerfil };
+// ── Invitar/crear un empleado en la empresa (solo admin) ─────────────
+const crearEmpleado = async ({ nombre, email, password, empresasId, rolNombre = "empleado" }) => {
+  let usuario = await prisma.usuarios.findUnique({ where: { email } });
+
+  if (!usuario) {
+    const hash = await bcrypt.hash(password, 10);
+    usuario = await prisma.usuarios.create({
+      data: { nombre, email, password: hash },
+    });
+  }
+
+  const rol = await prisma.roles.findFirst({ where: { nombre: rolNombre } });
+  if (!rol) {
+    const error = new Error(`Rol "${rolNombre}" no existe. Crea los roles primero.`);
+    error.status = 400;
+    throw error;
+  }
+
+  const yaEsMiembro = await prisma.usuarios_empresas.findFirst({
+    where: { usuarios_id: usuario.id, empresas_id: empresasId },
+  });
+  if (yaEsMiembro) {
+    const error = new Error("Este usuario ya pertenece a la empresa.");
+    error.status = 400;
+    throw error;
+  }
+
+  await prisma.usuarios_empresas.create({
+    data: { usuarios_id: usuario.id, empresas_id: empresasId, roles_id: rol.id },
+  });
+
+  const { password: _, ...sinPassword } = usuario;
+  return { usuario: sinPassword, rol: rolNombre };
+};
+
+// ── Listar miembros de la empresa ────────────────────────────────────
+const listarMiembros = async (empresasId) =>
+  prisma.usuarios_empresas.findMany({
+    where: { empresas_id: empresasId, activo: true },
+    include: { usuarios: { select: { id: true, nombre: true, email: true, activo: true } }, roles: true },
+  });
+
+// ── Desactivar miembro (sin borrar el usuario global) ────────────────
+const desactivarMiembro = async (usuariosEmpresasId, empresasId) => {
+  const membresia = await prisma.usuarios_empresas.findFirst({
+    where: { id: usuariosEmpresasId, empresas_id: empresasId },
+  });
+  if (!membresia) {
+    const error = new Error("Miembro no encontrado.");
+    error.status = 404;
+    throw error;
+  }
+  return prisma.usuarios_empresas.update({
+    where: { id: usuariosEmpresasId },
+    data: { activo: false },
+  });
+};
+
+export { registrar, login, seleccionarEmpresa, obtenerPerfil, crearEmpleado, listarMiembros, desactivarMiembro };

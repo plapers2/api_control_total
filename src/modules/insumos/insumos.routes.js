@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest } from "../../utils/response.js";
 import * as svc from "./insumos.service.js";
+import { requireRol } from "../../middlewares/auth.middleware.js";
 
 const router = Router();
 
@@ -25,7 +26,7 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-router.post("/", async (req, res, next) => {
+router.post("/", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, unidad_medida, stock_actual, stock_minimo, precio_unidad } = req.body;
     if (!nombre || !unidad_medida) return badRequest(res, "nombre y unidad_medida son requeridos.");
@@ -36,7 +37,7 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-router.put("/:id", async (req, res, next) => {
+router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, unidad_medida, stock_actual, stock_minimo, precio_unidad, activo } = req.body;
     const insumo = await svc.actualizar(Number(req.params.id), req.empresas_id, {
@@ -53,7 +54,7 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     await svc.eliminar(Number(req.params.id));
     return ok(res, null, "Insumo desactivado.");

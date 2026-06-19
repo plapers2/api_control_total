@@ -16,7 +16,7 @@ async function main() {
 
   // Usuario
   const hash = await bcrypt.hash("123456", 10);
-  const usuario = await prisma.usuarios.upsert({
+  const usuario = await prisma.usuarios.upsert({  
     where: { email: "mateo@controltotal.com" },
     update: {},
     create: {

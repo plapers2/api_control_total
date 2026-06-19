@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./productos.service.js";
+import { requireRol } from "../../middlewares/auth.middleware.js";
 
 const router = Router();
 
@@ -27,7 +28,7 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-router.post("/", async (req, res, next) => {
+router.post("/", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, descripcion, precio_venta } = req.body;
     if (!nombre) return badRequest(res, "nombre es requerido.");
@@ -38,7 +39,7 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-router.put("/:id", async (req, res, next) => {
+router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, descripcion, precio_venta, activo } = req.body;
     const p = await svc.actualizar(Number(req.params.id), { nombre, descripcion, precio_venta, activo });
@@ -48,7 +49,7 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     await svc.eliminar(Number(req.params.id));
     return ok(res, null, "Producto desactivado.");
@@ -59,7 +60,7 @@ router.delete("/:id", async (req, res, next) => {
 
 // ── PUT /productos/:id/receta ─────────────────────────────────────────
 // Reemplaza la receta completa del producto
-router.put("/:id/receta", async (req, res, next) => {
+router.put("/:id/receta", requireRol("admin"), async (req, res, next) => {
   try {
     const { insumos } = req.body;
     if (!Array.isArray(insumos)) return badRequest(res, "insumos debe ser un array.");
