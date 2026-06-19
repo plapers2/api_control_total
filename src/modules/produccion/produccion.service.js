@@ -1,4 +1,5 @@
 import prisma from "../../db/prisma.js";
+import { fechaColombiaToUTC } from "../../utils/timezone.js";
 
 const listar = async (empresasId) =>
   prisma.lotes_produccion.findMany({
@@ -110,7 +111,7 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
       data: {
         empresas_id: empresasId,
         usuarios_id: usuariosId,
-        fecha: new Date(fecha),
+        fecha: fechaColombiaToUTC(fecha),
         notas,
         costo_total: costoTotal,
         lotes_produccion_items: {

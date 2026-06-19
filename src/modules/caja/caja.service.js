@@ -1,5 +1,6 @@
 import prisma from "../../db/prisma.js";
 import { calcularRangoPeriodo } from "../../utils/periodo.js";
+import { fechaColombiaToUTC } from "../../utils/timezone.js";
 
 const listar = async (empresasId, { periodo = "dia", tipo, categoria, page = 1, limit = 10 } = {}) => {
   const { desde, hasta } = calcularRangoPeriodo(periodo);
@@ -63,11 +64,7 @@ const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
 // Si llegan insumos (array de {insumos_id, cantidad}), además del movimiento de
 // caja se suma cada cantidad al stock del insumo correspondiente (es opcional:
 // muchos gastos de "insumo" son solo control de gasto, sin inventario real).
-const registrar = async (
-  empresasId,
-  usuariosId,
-  { tipo, categoria, monto, descripcion, fecha, insumos },
-) => {
+const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha, insumos }) => {
   if (insumos?.length) {
     return prisma.$transaction(async (tx) => {
       const mov = await tx.movimientos_caja.create({
@@ -78,7 +75,7 @@ const registrar = async (
           categoria,
           monto,
           descripcion,
-          fecha: new Date(fecha),
+          fecha: fechaColombiaToUTC(fecha),
         },
       });
 
@@ -101,7 +98,7 @@ const registrar = async (
       categoria,
       monto,
       descripcion,
-      fecha: new Date(fecha),
+      fecha: fechaColombiaToUTC(fecha),
     },
   });
 };
@@ -125,7 +122,7 @@ const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion,
         categoria,
         monto,
         descripcion,
-        fecha: new Date(fecha),
+        fecha: fechaColombiaToUTC(fecha),
       },
     });
   });

@@ -1,5 +1,6 @@
 import prisma from "../../db/prisma.js";
 import { calcularRangoPeriodo } from "../../utils/periodo.js";
+import { fechaColombiaToUTC } from "../../utils/timezone.js";
 
 const listar = async (empresasId, { periodo = "dia", page = 1, limit = 10 } = {}) => {
   const { desde, hasta } = calcularRangoPeriodo(periodo);
@@ -59,7 +60,7 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
         usuarios_id: usuariosId,
         clientes_id: clientes_id ?? null,
         canal: canal ?? "punto_venta",
-        fecha: new Date(fecha),
+        fecha: fechaColombiaToUTC(fecha),
         notas,
         total,
         estado_pago: estadoPago,
@@ -92,7 +93,7 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
           categoria: "venta",
           monto: montoAbono,
           descripcion: estadoPago === "pagada" ? `Venta #${venta.id}` : `Abono inicial venta #${venta.id}`,
-          fecha: new Date(fecha),
+          fecha: fechaColombiaToUTC(fecha),
         },
       });
 
@@ -102,7 +103,7 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
             ventas_id: venta.id,
             usuarios_id: usuariosId,
             monto: montoAbono,
-            fecha: new Date(fecha),
+            fecha: fechaColombiaToUTC(fecha),
             nota: "Abono inicial",
           },
         });
