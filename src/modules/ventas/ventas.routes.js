@@ -28,10 +28,19 @@ router.get("/:id", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { fecha, canal, notas, clientes_id, items } = req.body;
+    const { fecha, canal, notas, clientes_id, items, credito, abono_inicial } = req.body;
     if (!fecha || !Array.isArray(items) || !items.length) return badRequest(res, "fecha e items son requeridos.");
+    if (credito && !clientes_id) return badRequest(res, "Para ventas a crédito debes asignar un cliente.");
 
-    const venta = await svc.crear(req.empresas_id, req.usuario.id, { fecha, canal, notas, clientes_id, items });
+    const venta = await svc.crear(req.empresas_id, req.usuario.id, {
+      fecha,
+      canal,
+      notas,
+      clientes_id,
+      items,
+      credito,
+      abono_inicial,
+    });
     return created(res, venta);
   } catch (err) {
     if (err.message?.includes("insuficiente") || err.message?.includes("Stock")) {

@@ -36,10 +36,11 @@ const obtener = async (id, empresasId) =>
       usuarios: true,
       ventas_items: { include: { productos: true } },
       movimientos_caja: true,
+      pagos_venta: true,
     },
   });
 
-const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id, items }) => {
+const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id, items, credito, abono_inicial }) => {
   return prisma.$transaction(async (tx) => {
     // Validar stock de cada producto
     for (const item of items) {
@@ -54,6 +55,12 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
 
     const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0);
 
+    // Ventas a crédito: el "abono inicial" puede ser 0 (queda 100% pendiente),
+    // parcial (queda "parcial") o cubrir todo el total (queda "pagada").
+    const esCredito = !!credito;
+    const montoAbono = esCredito ? Math.min(Number(abono_inicial || 0), total) : total;
+    const estadoPago = !esCredito || montoAbono >= total ? "pagada" : montoAbono > 0 ? "parcial" : "pendiente";
+
     const venta = await tx.ventas.create({
       data: {
         empresas_id: empresasId,
@@ -63,6 +70,7 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
         fecha: new Date(fecha),
         notas,
         total,
+        estado_pago: estadoPago,
         ventas_items: {
           create: items.map((i) => ({
             productos_id: i.productos_id,
@@ -83,19 +91,36 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
       });
     }
 
-    // Movimiento de caja automático
-    await tx.movimientos_caja.create({
-      data: {
-        empresas_id: empresasId,
-        usuarios_id: usuariosId,
-        ventas_id: venta.id,
-        tipo: "ingreso",
-        categoria: "venta",
-        monto: total,
-        descripcion: `Venta #${venta.id}`,
-        fecha: new Date(fecha),
-      },
-    });
+    // Solo entra a caja el dinero que realmente se recibió hoy (total si es pago
+    // completo, o el abono inicial si es a crédito). Si el abono es 0, no entra nada
+    // a caja todavía — entrará cuando se registre un abono en /deudas.
+    if (montoAbono > 0) {
+      await tx.movimientos_caja.create({
+        data: {
+          empresas_id: empresasId,
+          usuarios_id: usuariosId,
+          ventas_id: venta.id,
+          tipo: "ingreso",
+          categoria: "venta",
+          monto: montoAbono,
+          descripcion: estadoPago === "pagada" ? `Venta #${venta.id}` : `Abono inicial venta #${venta.id}`,
+          fecha: new Date(fecha),
+        },
+      });
+
+      // Si quedó parcial, registramos también el abono inicial en el historial de pagos.
+      if (esCredito && estadoPago !== "pagada") {
+        await tx.pagos_venta.create({
+          data: {
+            ventas_id: venta.id,
+            usuarios_id: usuariosId,
+            monto: montoAbono,
+            fecha: new Date(fecha),
+            nota: "Abono inicial",
+          },
+        });
+      }
+    }
 
     return venta;
   });

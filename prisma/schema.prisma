@@ -128,6 +128,7 @@ model usuarios {
   usuarios_empresas usuarios_empresas[]
   ventas            ventas[]
   movimientos_caja  movimientos_caja[]
+  pagos_venta       pagos_venta[]
 }
 
 model usuarios_empresas {
@@ -183,6 +184,7 @@ model ventas {
   clientes_id      Int?
   canal            ventas_canal       @default(punto_venta)
   total            Decimal            @default(0.00) @db.Decimal(10, 2)
+  estado_pago      ventas_estado_pago @default(pagada)
   notas            String?            @db.Text
   fecha            DateTime           @db.Date
   created_at       DateTime           @default(now()) @db.DateTime(0)
@@ -192,6 +194,7 @@ model ventas {
   clientes         clientes?          @relation(fields: [clientes_id], references: [id], map: "ventas_ibfk_3")
   ventas_items     ventas_items[]
   movimientos_caja movimientos_caja[]
+  pagos_venta      pagos_venta[]
 
   @@index([empresas_id], map: "fk_ventas_empresas")
   @@index([usuarios_id], map: "fk_ventas_usuarios")
@@ -210,6 +213,20 @@ model ventas_items {
 
   @@index([ventas_id], map: "fk_ventaitems_ventas")
   @@index([productos_id], map: "fk_ventaitems_productos")
+}
+
+model pagos_venta {
+  id          Int      @id @default(autoincrement())
+  ventas_id   Int
+  usuarios_id Int
+  monto       Decimal  @db.Decimal(10, 2)
+  fecha       DateTime @db.Date
+  nota        String?  @db.VarChar(255)
+  created_at  DateTime @default(now()) @db.DateTime(0)
+  ventas      ventas   @relation(fields: [ventas_id], references: [id], onDelete: Cascade)
+  usuarios    usuarios @relation(fields: [usuarios_id], references: [id])
+
+  @@index([ventas_id])
 }
 
 model movimientos_caja {
@@ -262,4 +279,10 @@ enum movimientos_caja_categoria {
   insumo
   servicio
   otro
+}
+
+enum ventas_estado_pago {
+  pagada
+  pendiente
+  parcial
 }
