@@ -18,11 +18,11 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// GET /caja/resumen?desde=2026-06-01&hasta=2026-06-30
+// GET /caja/resumen?periodo=dia|semana|mes  (o desde=...&hasta=... si necesitas un rango exacto)
 router.get("/resumen", async (req, res, next) => {
   try {
-    const { desde, hasta } = req.query;
-    return ok(res, await svc.resumen(req.empresas_id, { desde, hasta }));
+    const { periodo, desde, hasta } = req.query;
+    return ok(res, await svc.resumen(req.empresas_id, { periodo, desde, hasta }));
   } catch (err) {
     next(err);
   }

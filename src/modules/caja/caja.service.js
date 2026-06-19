@@ -26,13 +26,14 @@ const listar = async (empresasId, { periodo = "dia", tipo, categoria, page = 1, 
   return { rows, count };
 };
 
-const resumen = async (empresasId, { desde, hasta } = {}) => {
+const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
+  // Si llegan desde/hasta explícitos, tienen prioridad (compatibilidad).
+  // Si no, se usa el periodo (dia|semana|mes) igual que en listar().
+  const rango = desde && hasta ? { desde: new Date(desde), hasta: new Date(hasta) } : calcularRangoPeriodo(periodo);
+
   const where = {
     empresas_id: empresasId,
-    ...(desde &&
-      hasta && {
-        fecha: { gte: new Date(desde), lte: new Date(hasta) },
-      }),
+    fecha: { gte: rango.desde, lte: rango.hasta },
   };
 
   const [ingresos, gastos] = await Promise.all([
