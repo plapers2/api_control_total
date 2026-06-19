@@ -31,7 +31,7 @@ router.get("/resumen", async (req, res, next) => {
 // POST /caja — registro manual (gastos, etc.)
 router.post("/", async (req, res, next) => {
   try {
-    const { tipo, categoria, monto, descripcion, fecha } = req.body;
+    const { tipo, categoria, monto, descripcion, fecha, insumos } = req.body;
     if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
 
     const mov = await svc.registrar(req.empresas_id, req.usuario.id, {
@@ -40,6 +40,9 @@ router.post("/", async (req, res, next) => {
       monto,
       descripcion,
       fecha,
+      insumos: Array.isArray(insumos)
+        ? insumos.map((i) => ({ insumos_id: Number(i.insumos_id), cantidad: Number(i.cantidad) }))
+        : undefined,
     });
     return created(res, mov);
   } catch (err) {

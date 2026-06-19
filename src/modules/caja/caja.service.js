@@ -58,8 +58,40 @@ const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
 };
 
 // Registro manual (gastos, ajustes, etc.)
-const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha }) =>
-  prisma.movimientos_caja.create({
+// Si llegan insumos (array de {insumos_id, cantidad}), además del movimiento de
+// caja se suma cada cantidad al stock del insumo correspondiente (es opcional:
+// muchos gastos de "insumo" son solo control de gasto, sin inventario real).
+const registrar = async (
+  empresasId,
+  usuariosId,
+  { tipo, categoria, monto, descripcion, fecha, insumos },
+) => {
+  if (insumos?.length) {
+    return prisma.$transaction(async (tx) => {
+      const mov = await tx.movimientos_caja.create({
+        data: {
+          empresas_id: empresasId,
+          usuarios_id: usuariosId,
+          tipo,
+          categoria,
+          monto,
+          descripcion,
+          fecha: new Date(fecha),
+        },
+      });
+
+      for (const i of insumos) {
+        await tx.insumos.update({
+          where: { id: i.insumos_id },
+          data: { stock_actual: { increment: Number(i.cantidad) } },
+        });
+      }
+
+      return mov;
+    });
+  }
+
+  return prisma.movimientos_caja.create({
     data: {
       empresas_id: empresasId,
       usuarios_id: usuariosId,
@@ -70,5 +102,6 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
       fecha: new Date(fecha),
     },
   });
+};
 
 export { listar, resumen, registrar };
