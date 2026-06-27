@@ -1,19 +1,12 @@
 import prisma from "../../db/prisma.js";
 
-const listar = async (empresasId, { page = 1, limit = 10 } = {}) => {
-  const skip = (Number(page) - 1) * Number(limit);
-
-  const where = {
-    empresas_id: empresasId,
-    activo: true,
-  };
+const listar = async (empresasId) => {
+  const where = { empresas_id: empresasId, activo: true };
 
   const [rows, count] = await Promise.all([
     prisma.productos.findMany({
       where,
       orderBy: { nombre: "asc" },
-      skip,
-      take: Number(limit),
       include: { recetas: { include: { insumos: true } } },
     }),
     prisma.productos.count({ where }),
