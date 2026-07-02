@@ -7,10 +7,11 @@ import { requireRol } from "../../middlewares/auth.middleware.js";
 const router = Router();
 router.use(authenticate, requireEmpresa);
 
+// GET /ventas?periodo=dia|semana|mes|total&desde=YYYY-MM-DD&hasta=YYYY-MM-DD&page=1&limit=10
 router.get("/", async (req, res, next) => {
   try {
-    const { periodo, page, limit } = req.query;
-    const { rows, count } = await svc.listar(req.empresas_id, { periodo, page, limit });
+    const { periodo, desde, hasta, page, limit } = req.query;
+    const { rows, count } = await svc.listar(req.empresas_id, { periodo, desde, hasta, page, limit });
     return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {
     next(err);

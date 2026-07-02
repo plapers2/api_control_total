@@ -8,18 +8,23 @@ const router = Router();
 
 router.use(authenticate, requireEmpresa);
 
-// GET /caja?periodo=dia|semana|mes&tipo=ingreso&categoria=venta&page=1&limit=10
+// GET /caja?periodo=dia|semana|mes|total&desde=YYYY-MM-DD&hasta=YYYY-MM-DD&tipo=ingreso&categoria=venta&page=1&limit=10
+// - periodo=total (o "todo") trae todo lo registrado históricamente, sin filtro de fecha.
+// - desde/hasta (ambos) definen un rango personalizado y tienen prioridad sobre periodo.
 router.get("/", async (req, res, next) => {
   try {
-    const { periodo, tipo, categoria, page, limit } = req.query;
-    const { rows, count } = await svc.listar(req.empresas_id, { periodo, tipo, categoria, page, limit });
+    const { periodo, desde, hasta, tipo, categoria, page, limit } = req.query;
+    const { rows, count } = await svc.listar(req.empresas_id, { periodo, desde, hasta, tipo, categoria, page, limit });
     return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {
     next(err);
   }
 });
 
-// GET /caja/resumen?periodo=dia|semana|mes  (o desde=...&hasta=... si necesitas un rango exacto)
+// GET /caja/resumen?periodo=dia|semana|mes|total  (o desde=...&hasta=... para un rango exacto)
+// Siempre incluye, además del resumen del periodo pedido, el balance histórico
+// total (balanceTotal/ingresosTotal/gastosTotal) con todo lo registrado en el
+// sistema, para poder mostrarlo permanentemente sin importar el filtro activo.
 router.get("/resumen", async (req, res, next) => {
   try {
     const { periodo, desde, hasta } = req.query;

@@ -1,15 +1,15 @@
 import prisma from "../../db/prisma.js";
-import { calcularRangoPeriodo } from "../../utils/periodo.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
+import { construirRangoFecha } from "../../utils/rangoFecha.js";
 
-const listar = async (empresasId, { periodo = "dia", page = 1, limit = 10 } = {}) => {
-  const { desde, hasta } = calcularRangoPeriodo(periodo);
+const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10 } = {}) => {
+  const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
   const skip = (Number(page) - 1) * Number(limit);
 
   const where = {
     empresas_id: empresasId,
     anulada: false,
-    fecha: { gte: desde, lte: hasta },
+    ...(rangoFecha && { fecha: rangoFecha }),
   };
 
   const [rows, count] = await Promise.all([

@@ -253,6 +253,8 @@ model movimientos_caja {
   @@index([empresas_id], map: "fk_movcaja_empresas")
   @@index([usuarios_id], map: "fk_movcaja_usuarios")
   @@index([ventas_id], map: "fk_movcaja_ventas")
+  @@index([empresas_id, anulado, tipo], map: "idx_movcaja_balance")
+  @@index([empresas_id, anulado, fecha], map: "idx_movcaja_fecha")
 }
 
 enum insumos_unidad_medida {

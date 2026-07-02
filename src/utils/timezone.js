@@ -35,4 +35,22 @@ const fechaColombiaToUTC = (fechaString) => {
   return new Date(Date.UTC(y, m - 1, d, OFFSET_COLOMBIA_HORAS, 0, 0, 0));
 };
 
-export { fechaColombiaToUTC };
+/**
+ * Igual que fechaColombiaToUTC, pero ancla al final del día Colombia
+ * (23:59:59.999 Colombia). Útil como límite "hasta" de un rango de fechas,
+ * para que el día final quede incluido por completo.
+ *
+ * 'YYYY-MM-DD'  →  Date  (23:59:59.999 Colombia = 04:59:59.999 UTC del día siguiente)
+ */
+const finDiaColombiaToUTC = (fechaString) => {
+  if (!fechaString) return new Date();
+
+  const soloFecha = String(fechaString).slice(0, 10);
+  const [y, m, d] = soloFecha.split("-").map(Number);
+
+  if (!y || !m || !d) return new Date(fechaString);
+
+  return new Date(Date.UTC(y, m - 1, d, OFFSET_COLOMBIA_HORAS + 23, 59, 59, 999));
+};
+
+export { fechaColombiaToUTC, finDiaColombiaToUTC };
