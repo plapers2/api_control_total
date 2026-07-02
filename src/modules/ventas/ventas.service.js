@@ -110,6 +110,16 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
       }
     }
 
+    // El cliente volvió a comprar: si tenía el aviso de inactividad marcado
+    // como enviado, se resetea para que el ciclo de "15 días sin comprar"
+    // empiece de nuevo a partir de esta venta.
+    if (clientes_id) {
+      await tx.clientes.update({
+        where: { id: clientes_id },
+        data: { aviso_inactivo_enviado: false, aviso_inactivo_enviado_at: null },
+      });
+    }
+
     return venta;
   });
 };

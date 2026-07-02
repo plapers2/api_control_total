@@ -15,6 +15,17 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+// GET /clientes/inactivos?dias=15 — clientes activos con más de N días sin comprar.
+// Debe ir antes de "/:id" para que "inactivos" no se interprete como un id.
+router.get("/inactivos", async (req, res, next) => {
+  try {
+    const dias = req.query.dias ? Number(req.query.dias) : 15;
+    return ok(res, await svc.listarInactivos(req.empresas_id, dias));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/:id", async (req, res, next) => {
   try {
     const c = await svc.obtener(Number(req.params.id), req.empresas_id);
@@ -49,6 +60,18 @@ router.delete("/:id", async (req, res, next) => {
     await svc.eliminar(Number(req.params.id));
     return ok(res, null, "Cliente desactivado.");
   } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /clientes/:id/aviso — marcar (o desmarcar) que ya se envió el aviso de inactividad
+router.patch("/:id/aviso", async (req, res, next) => {
+  try {
+    const { enviado } = req.body;
+    const c = await svc.marcarAviso(Number(req.params.id), req.empresas_id, !!enviado);
+    return ok(res, c, enviado ? "Marcado como enviado." : "Marcado como pendiente.");
+  } catch (err) {
+    if (err.message?.includes("no encontrado")) return notFound(res, err.message);
     next(err);
   }
 });
