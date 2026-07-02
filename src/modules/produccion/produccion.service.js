@@ -109,23 +109,34 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
           include: { insumos: true },
         });
         let costoItem = 0;
-        for (const r of recetas) {
-          const cantidadUsada = Number(r.cantidad) * item.cantidad;
-          const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
-          costoItem += costoInsumo;
-          costoTotal += costoInsumo;
-          movimientos.push({
-            insumos_id: r.insumos_id,
-            tipo: "salida",
-            cantidad: cantidadUsada,
-            costo_total: costoInsumo,
-            nota: `Lote de produccion`,
-            usuarios_id: usuariosId,
-          });
-          await tx.insumos.update({
-            where: { id: r.insumos_id },
-            data: { stock_actual: { decrement: cantidadUsada } },
-          });
+
+        if (recetas.length === 0) {
+          // Producto de reventa (sin receta): el costo no sale de insumos,
+          // se ingresa manualmente como el total pagado por ese producto en
+          // el lote (ej: 10 paquetes a 70.000 que rinden 12 unidades para
+          // vender -> costo_total: 70000, cantidad: 12). No se redondea acá;
+          // el periódico queda vivo hasta que Prisma lo guarda con 4 decimales.
+          costoItem = Number(item.costo_total ?? 0);
+          costoTotal += costoItem;
+        } else {
+          for (const r of recetas) {
+            const cantidadUsada = Number(r.cantidad) * item.cantidad;
+            const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
+            costoItem += costoInsumo;
+            costoTotal += costoInsumo;
+            movimientos.push({
+              insumos_id: r.insumos_id,
+              tipo: "salida",
+              cantidad: cantidadUsada,
+              costo_total: costoInsumo,
+              nota: `Lote de produccion`,
+              usuarios_id: usuariosId,
+            });
+            await tx.insumos.update({
+              where: { id: r.insumos_id },
+              data: { stock_actual: { decrement: cantidadUsada } },
+            });
+          }
         }
         item.__costoCalculado = costoItem;
       }
@@ -271,23 +282,29 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
           include: { insumos: true },
         });
         let costoItem = 0;
-        for (const r of recetas) {
-          const cantidadUsada = Number(r.cantidad) * item.cantidad;
-          const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
-          costoItem += costoInsumo;
-          costoTotal += costoInsumo;
-          movimientos.push({
-            insumos_id: r.insumos_id,
-            tipo: "salida",
-            cantidad: cantidadUsada,
-            costo_total: costoInsumo,
-            nota: `Lote de produccion (editado)`,
-            usuarios_id: usuariosId,
-          });
-          await tx.insumos.update({
-            where: { id: r.insumos_id },
-            data: { stock_actual: { decrement: cantidadUsada } },
-          });
+
+        if (recetas.length === 0) {
+          costoItem = Number(item.costo_total ?? 0);
+          costoTotal += costoItem;
+        } else {
+          for (const r of recetas) {
+            const cantidadUsada = Number(r.cantidad) * item.cantidad;
+            const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
+            costoItem += costoInsumo;
+            costoTotal += costoInsumo;
+            movimientos.push({
+              insumos_id: r.insumos_id,
+              tipo: "salida",
+              cantidad: cantidadUsada,
+              costo_total: costoInsumo,
+              nota: `Lote de produccion (editado)`,
+              usuarios_id: usuariosId,
+            });
+            await tx.insumos.update({
+              where: { id: r.insumos_id },
+              data: { stock_actual: { decrement: cantidadUsada } },
+            });
+          }
         }
         item.__costoCalculado = costoItem;
       }

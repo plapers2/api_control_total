@@ -69,7 +69,7 @@ model lotes_produccion_items {
   lotes_produccion_id Int
   productos_id        Int
   cantidad            Int
-  costo_unitario      Decimal          @default(0.00) @db.Decimal(10, 2)
+  costo_unitario      Decimal          @default(0.0000) @db.Decimal(12, 4)
   lotes_produccion    lotes_produccion @relation(fields: [lotes_produccion_id], references: [id], onUpdate: Restrict, map: "fk_litems_lote")
   productos           productos        @relation(fields: [productos_id], references: [id], onUpdate: Restrict, map: "fk_litems_producto")
 
