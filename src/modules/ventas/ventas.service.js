@@ -2,14 +2,66 @@ import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 
-const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10 } = {}) => {
+const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10, q } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
   const skip = (Number(page) - 1) * Number(limit);
+
+  const texto = q?.trim();
+  let busqueda = {};
+
+  if (texto) {
+    // El operator "contains" de Prisma con el adaptador @prisma/adapter-mariadb
+    // hace bind del parámetro de texto con collation utf8mb4_bin sin importar la
+    // collation real de la columna (utf8mb4_unicode_ci), lo que MariaDB rechaza
+    // con "Illegal mix of collations" en cualquier LIKE, sin importar la
+    // complejidad de la consulta. Por eso resolvemos el texto con SQL crudo
+    // forzando COLLATE explícito en ambos lados, y solo usamos filtros de Prisma
+    // con IDs numéricos (sin LIKE de por medio) en la consulta principal.
+    const like = `%${texto}%`;
+
+    const [productosMatch, clientesMatch, ventasPorNotas] = await Promise.all([
+      prisma.$queryRaw`
+        SELECT id FROM productos
+        WHERE empresas_id = ${empresasId}
+        AND nombre COLLATE utf8mb4_unicode_ci LIKE ${like} COLLATE utf8mb4_unicode_ci
+      `,
+      prisma.$queryRaw`
+        SELECT id FROM clientes
+        WHERE empresas_id = ${empresasId}
+        AND nombre COLLATE utf8mb4_unicode_ci LIKE ${like} COLLATE utf8mb4_unicode_ci
+      `,
+      prisma.$queryRaw`
+        SELECT id FROM ventas
+        WHERE empresas_id = ${empresasId}
+        AND notas COLLATE utf8mb4_unicode_ci LIKE ${like} COLLATE utf8mb4_unicode_ci
+      `,
+    ]);
+
+    const productosIds = productosMatch.map((p) => p.id);
+    const clientesIds = clientesMatch.map((c) => c.id);
+    const ventaIdsPorNotas = ventasPorNotas.map((v) => v.id);
+
+    busqueda = {
+      OR: [
+        ...(Number.isInteger(Number(texto)) ? [{ id: Number(texto) }] : []),
+        ...(ventaIdsPorNotas.length ? [{ id: { in: ventaIdsPorNotas } }] : []),
+        ...(clientesIds.length ? [{ clientes_id: { in: clientesIds } }] : []),
+        ...(productosIds.length ? [{ ventas_items: { some: { productos_id: { in: productosIds } } } }] : []),
+      ],
+    };
+
+    // Si ningún lado del OR quedó poblado, forzamos un resultado vacío en vez de
+    // devolver todas las ventas (un OR: [] en Prisma no filtra nada).
+    if (!busqueda.OR.length) {
+      busqueda = { id: -1 };
+    }
+  }
 
   const where = {
     empresas_id: empresasId,
     anulada: false,
     ...(rangoFecha && { fecha: rangoFecha }),
+    ...busqueda,
   };
 
   const [rows, count] = await Promise.all([
