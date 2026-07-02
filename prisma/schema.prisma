@@ -61,6 +61,7 @@ model lotes_produccion {
   @@index([empresas_id], map: "fk_lotes_empresas")
   @@index([usuarios_id], map: "fk_lotes_usuarios")
   @@index([fecha], map: "idx_lotes_fecha")
+  @@index([empresas_id, anulado, fecha], map: "idx_lotes_empresa_fecha")
 }
 
 model lotes_produccion_items {
@@ -203,6 +204,7 @@ model ventas {
   @@index([empresas_id], map: "fk_ventas_empresas")
   @@index([usuarios_id], map: "fk_ventas_usuarios")
   @@index([clientes_id], map: "fk_ventas_clientes")
+  @@index([empresas_id, anulada, fecha], map: "idx_ventas_fecha")
 }
 
 model ventas_items {
