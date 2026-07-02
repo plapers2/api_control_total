@@ -16,6 +16,7 @@ import clientesRoutes from "./src/modules/clientes/clientes.routes.js";
 import ventasRoutes from "./src/modules/ventas/ventas.routes.js";
 import cajaRoutes from "./src/modules/caja/caja.routes.js";
 import deudasRoutes from "./src/modules/deudas/deudas.routes.js";
+import reportesRoutes from "./src/modules/reportes/rentabilidad.routes.js";
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use(`${API}/clientes`, clientesRoutes);
 app.use(`${API}/ventas`, ventasRoutes);
 app.use(`${API}/caja`, cajaRoutes);
 app.use(`${API}/deudas`, deudasRoutes);
+app.use(`${API}/reportes`, reportesRoutes);
 
 // ── Health check ─────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date() }));
