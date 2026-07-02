@@ -100,19 +100,25 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
         }
       }
 
+      // Costo exacto por item: como aquí sí sabemos qué receta corresponde a
+      // cada producto, se acumula el costo item por item (no solo el total
+      // global) para poder calcular su costo_unitario real más abajo.
       for (const item of items) {
         const recetas = await tx.recetas.findMany({
           where: { productos_id: item.productos_id },
           include: { insumos: true },
         });
+        let costoItem = 0;
         for (const r of recetas) {
           const cantidadUsada = Number(r.cantidad) * item.cantidad;
-          costoTotal += cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
+          const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
+          costoItem += costoInsumo;
+          costoTotal += costoInsumo;
           movimientos.push({
             insumos_id: r.insumos_id,
             tipo: "salida",
             cantidad: cantidadUsada,
-            costo_total: cantidadUsada * Number(r.insumos.precio_unidad ?? 0),
+            costo_total: costoInsumo,
             nota: `Lote de produccion`,
             usuarios_id: usuariosId,
           });
@@ -121,8 +127,16 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
             data: { stock_actual: { decrement: cantidadUsada } },
           });
         }
+        item.__costoCalculado = costoItem;
       }
     }
+
+    // costo_unitario por item: exacto si vino de receta (item.__costoCalculado),
+    // o repartido proporcionalmente entre todas las unidades del lote si el
+    // costo se registró con insumos_reales (no hay forma de saber qué insumo
+    // fue para cuál producto en ese caso, así que se usa el promedio del lote).
+    const totalUnidadesLote = items.reduce((s, i) => s + Number(i.cantidad), 0);
+    const costoUnitarioPromedioLote = totalUnidadesLote > 0 ? costoTotal / totalUnidadesLote : 0;
 
     // ── Crear el lote ─────────────────────────────────────────────────
     const lote = await tx.lotes_produccion.create({
@@ -136,7 +150,8 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
           create: items.map((i) => ({
             productos_id: i.productos_id,
             cantidad: i.cantidad,
-            costo_unitario: 0,
+            costo_unitario:
+              i.__costoCalculado != null && Number(i.cantidad) > 0 ? i.__costoCalculado / Number(i.cantidad) : costoUnitarioPromedioLote,
           })),
         },
       },
@@ -225,7 +240,61 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
           data: { stock_actual: { decrement: Number(ir.cantidad) } },
         });
       }
+    } else {
+      // Rama de receta (igual a crear): faltaba por completo aquí, así que
+      // editar un lote sin insumos_reales no descontaba insumos ni calculaba
+      // costo. Se replica la misma lógica de validación + cálculo por item.
+      const insumosTotales = {};
+      for (const item of items) {
+        const recetas = await tx.recetas.findMany({
+          where: { productos_id: item.productos_id },
+          include: { insumos: true },
+        });
+        for (const r of recetas) {
+          const cantidadUsada = Number(r.cantidad) * item.cantidad;
+          insumosTotales[r.insumos_id] = (insumosTotales[r.insumos_id] || 0) + cantidadUsada;
+        }
+      }
+
+      for (const [insumoId, cantidadNecesaria] of Object.entries(insumosTotales)) {
+        const insumo = await tx.insumos.findUnique({ where: { id: Number(insumoId) } });
+        if (Number(insumo.stock_actual) < cantidadNecesaria) {
+          throw new Error(
+            `Insumo insuficiente: "${insumo.nombre}". Disponible: ${insumo.stock_actual} ${insumo.unidad_medida}, necesario: ${cantidadNecesaria}.`,
+          );
+        }
+      }
+
+      for (const item of items) {
+        const recetas = await tx.recetas.findMany({
+          where: { productos_id: item.productos_id },
+          include: { insumos: true },
+        });
+        let costoItem = 0;
+        for (const r of recetas) {
+          const cantidadUsada = Number(r.cantidad) * item.cantidad;
+          const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
+          costoItem += costoInsumo;
+          costoTotal += costoInsumo;
+          movimientos.push({
+            insumos_id: r.insumos_id,
+            tipo: "salida",
+            cantidad: cantidadUsada,
+            costo_total: costoInsumo,
+            nota: `Lote de produccion (editado)`,
+            usuarios_id: usuariosId,
+          });
+          await tx.insumos.update({
+            where: { id: r.insumos_id },
+            data: { stock_actual: { decrement: cantidadUsada } },
+          });
+        }
+        item.__costoCalculado = costoItem;
+      }
     }
+
+    const totalUnidadesLote = items.reduce((s, i) => s + Number(i.cantidad), 0);
+    const costoUnitarioPromedioLote = totalUnidadesLote > 0 ? costoTotal / totalUnidadesLote : 0;
 
     // Crear nuevos items
     await tx.lotes_produccion_items.createMany({
@@ -233,7 +302,8 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
         lotes_produccion_id: id,
         productos_id: i.productos_id,
         cantidad: i.cantidad,
-        costo_unitario: 0,
+        costo_unitario:
+          i.__costoCalculado != null && Number(i.cantidad) > 0 ? i.__costoCalculado / Number(i.cantidad) : costoUnitarioPromedioLote,
       })),
     });
 

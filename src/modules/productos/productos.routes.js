@@ -30,9 +30,16 @@ router.get("/:id", async (req, res, next) => {
 
 router.post("/", requireRol("admin"), async (req, res, next) => {
   try {
-    const { nombre, descripcion, precio_venta } = req.body;
+    const { nombre, descripcion, precio_venta, usa_energia, usa_agua, usa_gas } = req.body;
     if (!nombre) return badRequest(res, "nombre es requerido.");
-    const p = await svc.crear(req.empresas_id, { nombre, descripcion, precio_venta });
+    const p = await svc.crear(req.empresas_id, {
+      nombre,
+      descripcion,
+      precio_venta,
+      usa_energia: !!usa_energia,
+      usa_agua: !!usa_agua,
+      usa_gas: !!usa_gas,
+    });
     return created(res, p);
   } catch (err) {
     next(err);
@@ -41,8 +48,16 @@ router.post("/", requireRol("admin"), async (req, res, next) => {
 
 router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
-    const { nombre, descripcion, precio_venta, activo } = req.body;
-    const p = await svc.actualizar(Number(req.params.id), { nombre, descripcion, precio_venta, activo });
+    const { nombre, descripcion, precio_venta, activo, usa_energia, usa_agua, usa_gas } = req.body;
+    const p = await svc.actualizar(Number(req.params.id), {
+      nombre,
+      descripcion,
+      precio_venta,
+      activo,
+      ...(usa_energia !== undefined && { usa_energia: !!usa_energia }),
+      ...(usa_agua !== undefined && { usa_agua: !!usa_agua }),
+      ...(usa_gas !== undefined && { usa_gas: !!usa_gas }),
+    });
     return ok(res, p);
   } catch (err) {
     next(err);

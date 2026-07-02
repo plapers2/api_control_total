@@ -37,12 +37,16 @@ router.get("/resumen", async (req, res, next) => {
 // POST /caja — registro manual (gastos, etc.)
 router.post("/", async (req, res, next) => {
   try {
-    const { tipo, categoria, monto, descripcion, fecha, insumos } = req.body;
+    const { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio } = req.body;
     if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
+    if (categoria === "servicio_publico" && !["energia", "agua", "gas"].includes(tipo_servicio)) {
+      return badRequest(res, "tipo_servicio (energia, agua o gas) es requerido cuando la categoría es servicio_publico.");
+    }
 
     const mov = await svc.registrar(req.empresas_id, req.usuario.id, {
       tipo,
       categoria,
+      tipo_servicio,
       monto,
       descripcion,
       fecha,
@@ -58,9 +62,12 @@ router.post("/", async (req, res, next) => {
 
 router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
-    const { tipo, categoria, monto, descripcion, fecha } = req.body;
+    const { tipo, categoria, monto, descripcion, fecha, tipo_servicio } = req.body;
     if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
-    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, { tipo, categoria, monto, descripcion, fecha });
+    if (categoria === "servicio_publico" && !["energia", "agua", "gas"].includes(tipo_servicio)) {
+      return badRequest(res, "tipo_servicio (energia, agua o gas) es requerido cuando la categoría es servicio_publico.");
+    }
+    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, { tipo, categoria, monto, descripcion, fecha, tipo_servicio });
     return ok(res, mov);
   } catch (err) {
     next(err);

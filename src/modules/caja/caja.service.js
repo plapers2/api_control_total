@@ -82,7 +82,11 @@ const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
 // Si llegan insumos (array de {insumos_id, cantidad}), además del movimiento de
 // caja se suma cada cantidad al stock del insumo correspondiente (es opcional:
 // muchos gastos de "insumo" son solo control de gasto, sin inventario real).
-const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha, insumos }) => {
+// tipo_servicio (energia/agua/gas) solo aplica cuando categoria = "servicio_publico".
+// Si llega en cualquier otra categoría, se ignora para no guardar basura.
+const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio }) => {
+  const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
+
   if (insumos?.length) {
     return prisma.$transaction(async (tx) => {
       const mov = await tx.movimientos_caja.create({
@@ -91,6 +95,7 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
           usuarios_id: usuariosId,
           tipo,
           categoria,
+          tipo_servicio: tipoServicioFinal,
           monto,
           descripcion,
           fecha: fechaColombiaToUTC(fecha),
@@ -114,6 +119,7 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
       usuarios_id: usuariosId,
       tipo,
       categoria,
+      tipo_servicio: tipoServicioFinal,
       monto,
       descripcion,
       fecha: fechaColombiaToUTC(fecha),
@@ -121,7 +127,9 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
   });
 };
 
-const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion, fecha, insumos }) => {
+const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio }) => {
+  const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
+
   return prisma.$transaction(async (tx) => {
     const mov = await tx.movimientos_caja.findFirst({
       where: { id, empresas_id: empresasId, anulado: false },
@@ -138,6 +146,7 @@ const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion,
       data: {
         tipo,
         categoria,
+        tipo_servicio: tipoServicioFinal,
         monto,
         descripcion,
         fecha: fechaColombiaToUTC(fecha),
