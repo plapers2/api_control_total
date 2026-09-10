@@ -1,4 +1,5 @@
 import prisma from "../../db/prisma.js";
+import { fechaColombiaToUTC } from "../../utils/timezone.js";
 
 const calcularSaldo = (venta) => {
   const pagado = venta.pagos_venta.reduce((s, p) => s + Number(p.monto), 0);
@@ -64,7 +65,7 @@ const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fec
         ventas_id: ventaId,
         usuarios_id: usuariosId,
         monto,
-        fecha: new Date(fecha),
+        fecha: fechaColombiaToUTC(fecha),
         nota,
       },
     });
@@ -86,7 +87,7 @@ const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fec
         categoria: "venta",
         monto,
         descripcion: `Abono venta #${ventaId}`,
-        fecha: new Date(fecha),
+        fecha: fechaColombiaToUTC(fecha),
       },
     });
 
