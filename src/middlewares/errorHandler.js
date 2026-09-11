@@ -1,4 +1,5 @@
 import { Prisma } from "../../generated/prisma/index.js";
+import multer from "multer";
 
 /**
  * Middleware global de manejo de errores.
@@ -6,6 +7,14 @@ import { Prisma } from "../../generated/prisma/index.js";
  */
 const errorHandler = (err, req, res, next) => {
   console.error(`[${new Date().toISOString()}] ERROR:`, err);
+
+  // Errores de multer (ej: archivo demasido grande)
+  if (err instanceof multer.MulterError) {
+    const mensajes = {
+      LIMIT_FILE_SIZE: "La imagen supera el tamaño máximo permitido (5 MB).",
+    };
+    return res.status(400).json({ message: mensajes[err.code] || "No se pudo procesar el archivo." });
+  }
 
   // Errores conocidos de Prisma
   if (err instanceof Prisma.PrismaClientKnownRequestError) {

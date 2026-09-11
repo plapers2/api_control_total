@@ -17,13 +17,21 @@ import ventasRoutes from "./src/modules/ventas/ventas.routes.js";
 import cajaRoutes from "./src/modules/caja/caja.routes.js";
 import deudasRoutes from "./src/modules/deudas/deudas.routes.js";
 import reportesRoutes from "./src/modules/reportes/rentabilidad.routes.js";
+import publicRoutes from "./src/modules/public/public.routes.js";
 
 const app = express();
 
 // ── Middlewares globales ────────────────────────────────────────────
-app.use(cors());
+// CORS_ORIGINS: lista separada por comas (ej: "https://midominio.com,https://www.midominio.com").
+// Si no se define, se permite cualquier origen (útil en desarrollo).
+const origenesPermitidos = process.env.CORS_ORIGINS?.split(",").map((o) => o.trim());
+app.use(cors(origenesPermitidos ? { origin: origenesPermitidos } : undefined));
 app.use(express.json());
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+
+// Imágenes de producto subidas (públicas, sin autenticación — se muestran
+// tanto en el panel de administración como en la página pública).
+app.use("/uploads", express.static("uploads"));
 
 // ── Rutas ────────────────────────────────────────────────────────────
 const API = "/api";
@@ -37,6 +45,7 @@ app.use(`${API}/ventas`, ventasRoutes);
 app.use(`${API}/caja`, cajaRoutes);
 app.use(`${API}/deudas`, deudasRoutes);
 app.use(`${API}/reportes`, reportesRoutes);
+app.use(`${API}/public`, publicRoutes);
 
 // ── Health check ─────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date() }));

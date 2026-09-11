@@ -3,6 +3,7 @@ import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.
 import { ok, created, notFound, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./productos.service.js";
 import { requireRol } from "../../middlewares/auth.middleware.js";
+import { uploadImagenProducto } from "../../middlewares/upload.middleware.js";
 
 const router = Router();
 
@@ -95,6 +96,22 @@ router.put("/:id/receta", requireRol("admin"), async (req, res, next) => {
     if (!Array.isArray(insumos)) return badRequest(res, "insumos debe ser un array.");
     const receta = await svc.sincronizarReceta(Number(req.params.id), insumos);
     return ok(res, receta);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /productos/:id/imagen ────────────────────────────────────────
+// Sube (o reemplaza) la foto del producto, usada en la página pública.
+router.post("/:id/imagen", requireRol("admin"), uploadImagenProducto.single("imagen"), async (req, res, next) => {
+  try {
+    const producto = await svc.obtener(Number(req.params.id), req.empresas_id);
+    if (!producto) return notFound(res);
+    if (!req.file) return badRequest(res, "Debes adjuntar una imagen (campo 'imagen').");
+
+    const imagen_url = `/uploads/productos/${req.file.filename}`;
+    const actualizado = await svc.actualizar(Number(req.params.id), { imagen_url });
+    return ok(res, actualizado);
   } catch (err) {
     next(err);
   }
