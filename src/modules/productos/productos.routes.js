@@ -28,6 +28,20 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
+// ── GET /productos/:id/historial ──────────────────────────────────────
+// Historial de entradas (producción) y salidas (ventas) de un producto.
+router.get("/:id/historial", async (req, res, next) => {
+  try {
+    const producto = await svc.obtener(Number(req.params.id), req.empresas_id);
+    if (!producto) return notFound(res);
+    const { page, limit } = req.query;
+    const { rows, count } = await svc.historial(Number(req.params.id), req.empresas_id, { page, limit });
+    return paginate(res, rows, count, page || 1, limit || 15);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post("/", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, descripcion, precio_venta, usa_energia, usa_agua, usa_gas } = req.body;
