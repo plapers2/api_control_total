@@ -1,4 +1,5 @@
 import prisma from "../../db/prisma.js";
+import { noEncontrado } from "../../utils/errors.js";
 
 const MS_POR_DIA = 1000 * 60 * 60 * 24;
 
@@ -12,9 +13,22 @@ const obtener = async (id, empresasId) => prisma.clientes.findFirst({ where: { i
 
 const crear = async (empresasId, data) => prisma.clientes.create({ data: { ...data, empresas_id: empresasId } });
 
-const actualizar = async (id, data) => prisma.clientes.update({ where: { id }, data });
+const actualizar = async (id, empresasId, data) => {
+  const { count } = await prisma.clientes.updateMany({
+    where: { id, empresas_id: empresasId },
+    data,
+  });
+  if (count === 0) throw noEncontrado("Cliente no encontrado.");
+  return prisma.clientes.findFirst({ where: { id, empresas_id: empresasId } });
+};
 
-const eliminar = async (id) => prisma.clientes.update({ where: { id }, data: { activo: false } });
+const eliminar = async (id, empresasId) => {
+  const { count } = await prisma.clientes.updateMany({
+    where: { id, empresas_id: empresasId },
+    data: { activo: false },
+  });
+  if (count === 0) throw noEncontrado("Cliente no encontrado.");
+};
 
 // Clientes activos con más de `dias` días sin comprar (o que nunca han comprado).
 // Trae, por cada cliente, solo su venta más reciente no anulada (take: 1),

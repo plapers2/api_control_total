@@ -1,4 +1,5 @@
 import prisma from "../../db/prisma.js";
+import { noEncontrado } from "../../utils/errors.js";
 
 const listar = async (empresasId) =>
   prisma.insumos.findMany({
@@ -18,12 +19,21 @@ const obtener = async (id, empresasId) =>
 
 const crear = async (empresasId, data) => prisma.insumos.create({ data: { ...data, empresas_id: empresasId } });
 
-const actualizar = async (id, empresasId, data) =>
-  prisma.insumos.update({
-    where: { id },
+const actualizar = async (id, empresasId, data) => {
+  const { count } = await prisma.insumos.updateMany({
+    where: { id, empresas_id: empresasId },
     data,
   });
+  if (count === 0) throw noEncontrado("Insumo no encontrado.");
+  return prisma.insumos.findFirst({ where: { id, empresas_id: empresasId } });
+};
 
-const eliminar = async (id) => prisma.insumos.update({ where: { id }, data: { activo: false } });
+const eliminar = async (id, empresasId) => {
+  const { count } = await prisma.insumos.updateMany({
+    where: { id, empresas_id: empresasId },
+    data: { activo: false },
+  });
+  if (count === 0) throw noEncontrado("Insumo no encontrado.");
+};
 
 export { listar, obtener, crear, actualizar, eliminar };

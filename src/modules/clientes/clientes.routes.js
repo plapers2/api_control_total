@@ -49,7 +49,7 @@ router.post("/", async (req, res, next) => {
 router.put("/:id", async (req, res, next) => {
   try {
     const { nombre, telefono, direccion, notas, activo } = req.body;
-    return ok(res, await svc.actualizar(Number(req.params.id), { nombre, telefono, direccion, notas, activo }));
+    return ok(res, await svc.actualizar(Number(req.params.id), req.empresas_id, { nombre, telefono, direccion, notas, activo }));
   } catch (err) {
     next(err);
   }
@@ -57,7 +57,7 @@ router.put("/:id", async (req, res, next) => {
 
 router.delete("/:id", async (req, res, next) => {
   try {
-    await svc.eliminar(Number(req.params.id));
+    await svc.eliminar(Number(req.params.id), req.empresas_id);
     return ok(res, null, "Cliente desactivado.");
   } catch (err) {
     next(err);

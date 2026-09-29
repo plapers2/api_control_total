@@ -56,7 +56,7 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
 
 router.delete("/:id", requireRol("admin"), async (req, res, next) => {
   try {
-    await svc.eliminar(Number(req.params.id));
+    await svc.eliminar(Number(req.params.id), req.empresas_id);
     return ok(res, null, "Insumo desactivado.");
   } catch (err) {
     next(err);

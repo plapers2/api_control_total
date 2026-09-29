@@ -64,7 +64,7 @@ router.post("/", requireRol("admin"), async (req, res, next) => {
 router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, descripcion, precio_venta, activo, usa_energia, usa_agua, usa_gas } = req.body;
-    const p = await svc.actualizar(Number(req.params.id), {
+    const p = await svc.actualizar(Number(req.params.id), req.empresas_id, {
       nombre,
       descripcion,
       precio_venta,
@@ -81,7 +81,7 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
 
 router.delete("/:id", requireRol("admin"), async (req, res, next) => {
   try {
-    await svc.eliminar(Number(req.params.id));
+    await svc.eliminar(Number(req.params.id), req.empresas_id);
     return ok(res, null, "Producto desactivado.");
   } catch (err) {
     next(err);
@@ -94,7 +94,7 @@ router.put("/:id/receta", requireRol("admin"), async (req, res, next) => {
   try {
     const { insumos } = req.body;
     if (!Array.isArray(insumos)) return badRequest(res, "insumos debe ser un array.");
-    const receta = await svc.sincronizarReceta(Number(req.params.id), insumos);
+    const receta = await svc.sincronizarReceta(Number(req.params.id), req.empresas_id, insumos);
     return ok(res, receta);
   } catch (err) {
     next(err);
@@ -110,7 +110,7 @@ router.post("/:id/imagen", requireRol("admin"), uploadImagenProducto.single("ima
     if (!req.file) return badRequest(res, "Debes adjuntar una imagen (campo 'imagen').");
 
     const imagen_url = `/uploads/productos/${req.file.filename}`;
-    const actualizado = await svc.actualizar(Number(req.params.id), { imagen_url });
+    const actualizado = await svc.actualizar(Number(req.params.id), req.empresas_id, { imagen_url });
     return ok(res, actualizado);
   } catch (err) {
     next(err);
