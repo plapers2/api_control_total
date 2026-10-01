@@ -39,14 +39,7 @@ router.post("/:ventaId/pagos", async (req, res, next) => {
     });
     return created(res, pago, "Abono registrado.");
   } catch (err) {
-    if (
-      err.message?.includes("saldo") ||
-      err.message?.includes("pagada") ||
-      err.message?.includes("encontrada") ||
-      err.message?.includes("mayor a 0")
-    ) {
-      return badRequest(res, err.message);
-    }
+    // Los errores con status (400/404) los responde el errorHandler con su mensaje
     next(err);
   }
 });

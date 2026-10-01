@@ -1,5 +1,15 @@
 import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
+import { noEncontrado } from "../../utils/errors.js";
+
+const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
+
+// Una venta anulada nunca es deuda, aunque su estado_pago siga en pendiente/parcial.
+const filtroDeudas = (empresasId) => ({
+  empresas_id: empresasId,
+  anulada: false,
+  estado_pago: { in: ["pendiente", "parcial"] },
+});
 
 const calcularSaldo = (venta) => {
   const pagado = venta.pagos_venta.reduce((s, p) => s + Number(p.monto), 0);
@@ -9,10 +19,7 @@ const calcularSaldo = (venta) => {
 const listar = async (empresasId, { page = 1, limit = 10 } = {}) => {
   const skip = (Number(page) - 1) * Number(limit);
 
-  const where = {
-    empresas_id: empresasId,
-    estado_pago: { in: ["pendiente", "parcial"] },
-  };
+  const where = filtroDeudas(empresasId);
 
   const [rows, count] = await Promise.all([
     prisma.ventas.findMany({
@@ -36,7 +43,7 @@ const listar = async (empresasId, { page = 1, limit = 10 } = {}) => {
 
 const resumen = async (empresasId) => {
   const ventas = await prisma.ventas.findMany({
-    where: { empresas_id: empresasId, estado_pago: { in: ["pendiente", "parcial"] } },
+    where: filtroDeudas(empresasId),
     include: { pagos_venta: true },
   });
 
@@ -46,19 +53,21 @@ const resumen = async (empresasId) => {
 };
 
 const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fecha }) => {
+  if (!Number.isFinite(monto) || monto <= 0) throw badRequest("El monto del abono debe ser mayor a 0.");
+
   return prisma.$transaction(async (tx) => {
     const venta = await tx.ventas.findFirst({
       where: { id: ventaId, empresas_id: empresasId },
       include: { pagos_venta: true },
     });
-    if (!venta) throw new Error("Venta no encontrada.");
-    if (venta.estado_pago === "pagada") throw new Error("Esta venta ya está pagada por completo.");
+    if (!venta) throw noEncontrado("Venta no encontrada.");
+    if (venta.anulada) throw badRequest("Esta venta está anulada y no admite abonos.");
+    if (venta.estado_pago === "pagada") throw badRequest("Esta venta ya está pagada por completo.");
 
     const pagadoActual = venta.pagos_venta.reduce((s, p) => s + Number(p.monto), 0);
     const saldo = Number(venta.total) - pagadoActual;
 
-    if (monto <= 0) throw new Error("El monto del abono debe ser mayor a 0.");
-    if (monto > saldo) throw new Error(`El abono no puede ser mayor al saldo pendiente (${saldo}).`);
+    if (monto > saldo) throw badRequest(`El abono no puede ser mayor al saldo pendiente (${saldo}).`);
 
     const pago = await tx.pagos_venta.create({
       data: {
