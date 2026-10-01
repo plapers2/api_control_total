@@ -36,4 +36,13 @@ router.post("/empresas", async (req, res, next) => {
   }
 });
 
+// GET /superadmin/usuarios
+router.get("/usuarios", async (req, res, next) => {
+  try {
+    return ok(res, await svc.listarUsuarios());
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

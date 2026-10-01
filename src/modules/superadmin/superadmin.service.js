@@ -65,4 +65,12 @@ const listarEmpresas = async () =>
     },
   });
 
-export { crearEmpresaConAdmin, listarEmpresas };
+const listarUsuarios = async () =>
+  prisma.usuarios.findMany({
+    where: { activo: true },
+    select: { id: true, nombre: true, email: true },
+    orderBy: { nombre: "asc" },
+    take: 200,
+  });
+
+export { crearEmpresaConAdmin, listarEmpresas, listarUsuarios };
