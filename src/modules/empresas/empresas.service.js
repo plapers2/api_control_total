@@ -9,36 +9,6 @@ const listarMisEmpresas = async (usuarioId) => {
   });
 };
 
-// ── POST /empresas ───────────────────────────────────────────────────
-// Crea una empresa y vuelve admin automáticamente al usuario que la crea
-const crearEmpresa = async ({ nombre, descripcion, usuarioId }) => {
-  const rolAdmin = await prisma.roles.findUnique({ where: { nombre: "admin" } });
-  if (!rolAdmin) {
-    const error = new Error('No existe el rol "admin". Revisa el seed de roles.');
-    error.status = 500;
-    throw error;
-  }
-
-  // $transaction: si cualquiera de las dos operaciones falla, ninguna se aplica.
-  const empresa = await prisma.$transaction(async (tx) => {
-    const nuevaEmpresa = await tx.empresas.create({
-      data: { nombre, descripcion },
-    });
-
-    await tx.usuarios_empresas.create({
-      data: {
-        usuarios_id: usuarioId,
-        empresas_id: nuevaEmpresa.id,
-        roles_id: rolAdmin.id,
-      },
-    });
-
-    return nuevaEmpresa;
-  });
-
-  return empresa;
-};
-
 // ── GET /empresas/:id ─────────────────────────────────────────────────
 const obtenerEmpresa = async (id) => {
   const empresa = await prisma.empresas.findUnique({
@@ -111,4 +81,4 @@ const removerMiembro = async (empresasId, usuariosId) => {
   });
 };
 
-export { listarMisEmpresas, crearEmpresa, obtenerEmpresa, actualizarEmpresa, listarMiembros, agregarMiembro, removerMiembro };
+export { listarMisEmpresas, obtenerEmpresa, actualizarEmpresa, listarMiembros, agregarMiembro, removerMiembro };

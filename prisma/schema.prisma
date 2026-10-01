@@ -136,6 +136,8 @@ model usuarios {
   ventas            ventas[]
   movimientos_caja  movimientos_caja[]
   pagos_venta       pagos_venta[]
+  es_superadmin         Boolean @default(false)
+  debe_cambiar_password Boolean @default(false)
 }
 
 model usuarios_empresas {

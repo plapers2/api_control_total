@@ -6,7 +6,7 @@ import prisma from "../db/prisma.js";
  * Si el token trae empresas_id en el payload, también adjunta req.membresia
  * con el rol del usuario en esa empresa.
  */
-const authenticate = async (req, res, next) => {
+const verificarToken = (permitirCambioPendiente) => async (req, res, next) => {
   try {
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
@@ -23,18 +23,20 @@ const authenticate = async (req, res, next) => {
       return res.status(401).json({ message: "Usuario no encontrado o inactivo." });
     }
 
-    // No exponemos el hash de password en req.usuario
+    // Debe cambiar la contraseña antes de usar cualquier otra ruta
+    if (usuario.debe_cambiar_password && !permitirCambioPendiente) {
+      return res.status(403).json({
+        message: "Debes cambiar tu contraseña antes de continuar.",
+        code: "DEBE_CAMBIAR_PASSWORD",
+      });
+    }
+
     const { password, ...usuarioSinPassword } = usuario;
     req.usuario = usuarioSinPassword;
 
-    // Si el token incluye empresas_id, cargar la membresía + rol
     if (payload.empresas_id) {
       const membresia = await prisma.usuarios_empresas.findFirst({
-        where: {
-          usuarios_id: usuario.id,
-          empresas_id: payload.empresas_id,
-          activo: true,
-        },
+        where: { usuarios_id: usuario.id, empresas_id: payload.empresas_id, activo: true },
         include: { roles: true },
       });
 
@@ -54,6 +56,9 @@ const authenticate = async (req, res, next) => {
     return res.status(401).json({ message: "Token inválido." });
   }
 };
+
+const authenticate = verificarToken(false);
+const authenticateParaCambioPassword = verificarToken(true);
 
 /**
  * Requiere que el token tenga empresas_id (empresa seleccionada).
@@ -83,4 +88,11 @@ const requireRol =
     next();
   };
 
-export { authenticate, requireEmpresa, requireRol };
+const requireSuperadmin = (req, res, next) => {
+  if (!req.usuario?.es_superadmin) {
+    return res.status(403).json({ message: "Acceso restringido." });
+  }
+  next();
+};
+
+export { authenticate, authenticateParaCambioPassword, requireEmpresa, requireRol, requireSuperadmin };

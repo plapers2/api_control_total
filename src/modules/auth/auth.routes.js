@@ -1,21 +1,9 @@
 import { Router } from "express";
-import { authenticate, requireEmpresa, requireRol } from "../../middlewares/auth.middleware.js";
+import { authenticate, authenticateParaCambioPassword, requireEmpresa, requireRol } from "../../middlewares/auth.middleware.js";
 import { ok, created, badRequest } from "../../utils/response.js";
 import * as authService from "./auth.service.js";
 
 const router = Router();
-
-// ── POST /auth/register ─────────────────────────────────────────────
-router.post("/register", async (req, res, next) => {
-  try {
-    const { nombre, email, password } = req.body;
-    if (!nombre || !email || !password) return badRequest(res, "nombre, email y password son requeridos.");
-    const data = await authService.registrar({ nombre, email, password });
-    return created(res, data, "Registro exitoso.");
-  } catch (err) {
-    next(err);
-  }
-});
 
 // ── POST /auth/login ─────────────────────────────────────────────────
 router.post("/login", async (req, res, next) => {
@@ -86,6 +74,23 @@ router.delete("/usuarios/:id", authenticate, requireEmpresa, requireRol("admin")
   try {
     await authService.desactivarMiembro(Number(req.params.id), req.empresas_id);
     return ok(res, null, "Miembro desactivado.");
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /auth/cambiar-password ──────────────────────────────────────
+router.post("/cambiar-password", authenticateParaCambioPassword, async (req, res, next) => {
+  try {
+    const { password_actual, password_nuevo } = req.body;
+    if (!password_actual || !password_nuevo) {
+      return badRequest(res, "password_actual y password_nuevo son requeridos.");
+    }
+    await authService.cambiarPassword(req.usuario.id, {
+      passwordActual: password_actual,
+      passwordNuevo: password_nuevo,
+    });
+    return ok(res, null, "Contraseña actualizada.");
   } catch (err) {
     next(err);
   }

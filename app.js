@@ -18,6 +18,7 @@ import cajaRoutes from "./src/modules/caja/caja.routes.js";
 import deudasRoutes from "./src/modules/deudas/deudas.routes.js";
 import reportesRoutes from "./src/modules/reportes/rentabilidad.routes.js";
 import publicRoutes from "./src/modules/public/public.routes.js";
+import superadminRoutes from "./src/modules/superadmin/superadmin.routes.js";
 
 const app = express();
 
@@ -46,6 +47,7 @@ app.use(`${API}/caja`, cajaRoutes);
 app.use(`${API}/deudas`, deudasRoutes);
 app.use(`${API}/reportes`, reportesRoutes);
 app.use(`${API}/public`, publicRoutes);
+app.use(`${API}/superadmin`, superadminRoutes);
 
 // ── Health check ─────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "ok", timestamp: new Date() }));

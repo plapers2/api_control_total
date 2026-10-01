@@ -17,23 +17,6 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// ── POST /empresas ───────────────────────────────────────────────────
-router.post("/", async (req, res, next) => {
-  try {
-    const { nombre, descripcion } = req.body;
-    if (!nombre) return badRequest(res, "El nombre de la empresa es requerido.");
-
-    const empresa = await empresasService.crearEmpresa({
-      nombre,
-      descripcion,
-      usuarioId: req.usuario.id,
-    });
-    return created(res, empresa);
-  } catch (err) {
-    next(err);
-  }
-});
-
 // ── GET /empresas/:id ─────────────────────────────────────────────────
 router.get("/:id", async (req, res, next) => {
   try {

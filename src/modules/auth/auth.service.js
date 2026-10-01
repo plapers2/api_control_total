@@ -142,4 +142,26 @@ const desactivarMiembro = async (usuariosEmpresasId, empresasId) => {
   });
 };
 
-export { registrar, login, seleccionarEmpresa, obtenerPerfil, crearEmpleado, listarMiembros, desactivarMiembro };
+const cambiarPassword = async (usuarioId, { passwordActual, passwordNuevo }) => {
+  const error = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
+
+  const usuario = await prisma.usuarios.findUnique({
+    where: { id: usuarioId },
+    omit: { password: false },
+  });
+
+  const coincide = await bcrypt.compare(passwordActual, usuario.password);
+  if (!coincide) throw error("La contraseña actual es incorrecta.");
+  if (passwordNuevo.length < 8) throw error("La nueva contraseña debe tener al menos 8 caracteres.");
+  if (passwordNuevo === passwordActual) throw error("La nueva contraseña debe ser distinta a la actual.");
+
+  await prisma.usuarios.update({
+    where: { id: usuarioId },
+    data: {
+      password: await bcrypt.hash(passwordNuevo, 10),
+      debe_cambiar_password: false,
+    },
+  });
+};
+
+export { registrar, login, seleccionarEmpresa, obtenerPerfil, crearEmpleado, listarMiembros, desactivarMiembro, cambiarPassword };
