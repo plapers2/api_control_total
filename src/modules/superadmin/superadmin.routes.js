@@ -45,4 +45,16 @@ router.get("/usuarios", async (req, res, next) => {
   }
 });
 
+// POST /superadmin/usuarios/:id/password-temporal
+router.post("/usuarios/:id/password-temporal", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return badRequest(res, "ID inválido.");
+    res.set("Cache-Control", "no-store");
+    return ok(res, await svc.regenerarPasswordTemporal(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

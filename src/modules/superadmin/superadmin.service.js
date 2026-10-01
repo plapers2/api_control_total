@@ -49,7 +49,7 @@ const crearEmpresaConAdmin = async ({ nombre, descripcion, admin }) => {
   return {
     empresa: resultado.empresa,
     admin: { id: resultado.usuario.id, nombre: resultado.usuario.nombre, email: resultado.usuario.email },
-    // Solo viene si se creó un usuario nuevo. Se muestra una única vez.
+    // Solo viene si se creó un usuario nuevo.
     password_temporal: passwordTemporal,
   };
 };
@@ -60,7 +60,11 @@ const listarEmpresas = async () =>
     include: {
       usuarios_empresas: {
         where: { activo: true, roles: { nombre: "admin" } },
-        include: { usuarios: { select: { id: true, nombre: true, email: true } } },
+        include: {
+          usuarios: {
+            select: { id: true, nombre: true, email: true, debe_cambiar_password: true },
+          },
+        },
       },
     },
   });
@@ -73,4 +77,25 @@ const listarUsuarios = async () =>
     take: 200,
   });
 
-export { crearEmpresaConAdmin, listarEmpresas, listarUsuarios };
+// Genera una clave temporal nueva (invalida la anterior).
+// Solo para usuarios que aún no han hecho su primer ingreso.
+const regenerarPasswordTemporal = async (usuarioId) => {
+  const passwordTemporal = generarPasswordTemporal();
+
+  const { count } = await prisma.usuarios.updateMany({
+    where: { id: usuarioId, activo: true, debe_cambiar_password: true, es_superadmin: false },
+    data: { password: await bcrypt.hash(passwordTemporal, 10) },
+  });
+  if (count === 0) {
+    throw noEncontrado("Este usuario no tiene un primer ingreso pendiente.");
+  }
+
+  const usuario = await prisma.usuarios.findUnique({
+    where: { id: usuarioId },
+    select: { id: true, nombre: true, email: true },
+  });
+
+  return { usuario, password_temporal: passwordTemporal };
+};
+
+export { crearEmpresaConAdmin, listarEmpresas, listarUsuarios, regenerarPasswordTemporal };
