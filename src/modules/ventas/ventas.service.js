@@ -1,6 +1,10 @@
 import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
+import { noEncontrado } from "../../utils/errors.js";
+
+const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
+const centavos = (n) => Math.round(Number(n) * 100);
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10, q } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
@@ -96,9 +100,9 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
       const producto = await tx.productos.findFirst({
         where: { id: item.productos_id, empresas_id: empresasId, activo: true },
       });
-      if (!producto) throw new Error(`Producto ${item.productos_id} no encontrado.`);
+      if (!producto) throw badRequest(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad)
-        throw new Error(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
+        throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
     }
 
     const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0);
@@ -180,9 +184,27 @@ const actualizar = async (id, empresasId, usuariosId, { canal, notas, items }) =
   return prisma.$transaction(async (tx) => {
     const venta = await tx.ventas.findFirst({
       where: { id, empresas_id: empresasId, anulada: false },
-      include: { ventas_items: true },
+      include: { ventas_items: true, pagos_venta: true },
     });
-    if (!venta) throw new Error("Venta no encontrada.");
+    if (!venta) throw noEncontrado("Venta no encontrada.");
+
+    const nuevoTotal = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0);
+
+    // ¿Cuánto se ha cobrado ya?
+    // - Venta de contado (o a crédito pagada al crear): no tiene filas en pagos_venta,
+    //   su único movimiento de caja es el total de la venta.
+    // - Venta a crédito con abonos: cada movimiento de caja es un abono y NO debe tocarse.
+    const hayPagos = venta.pagos_venta.length > 0;
+    const esContado = !hayPagos && venta.estado_pago === "pagada";
+    const pagado = venta.pagos_venta.reduce((s, p) => s + Number(p.monto), 0);
+
+    let nuevoEstado = venta.estado_pago;
+    if (!esContado) {
+      if (centavos(pagado) > centavos(nuevoTotal)) {
+        throw badRequest(`El nuevo total (${nuevoTotal}) es menor a lo ya abonado (${pagado}). Ajusta los productos o anula la venta.`);
+      }
+      nuevoEstado = centavos(pagado) >= centavos(nuevoTotal) ? "pagada" : pagado > 0 ? "parcial" : "pendiente";
+    }
 
     // Revertir stock de items anteriores
     for (const item of venta.ventas_items) {
@@ -197,12 +219,10 @@ const actualizar = async (id, empresasId, usuariosId, { canal, notas, items }) =
       const producto = await tx.productos.findFirst({
         where: { id: item.productos_id, empresas_id: empresasId, activo: true },
       });
-      if (!producto) throw new Error(`Producto ${item.productos_id} no encontrado.`);
+      if (!producto) throw badRequest(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad)
-        throw new Error(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
+        throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
     }
-
-    const nuevoTotal = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0);
 
     // Reemplazar items
     await tx.ventas_items.deleteMany({ where: { ventas_id: id } });
@@ -224,20 +244,22 @@ const actualizar = async (id, empresasId, usuariosId, { canal, notas, items }) =
       });
     }
 
-    // Actualizar movimiento de caja vinculado
-    const movCaja = await tx.movimientos_caja.findFirst({
-      where: { ventas_id: id, anulado: false },
-    });
-    if (movCaja) {
-      await tx.movimientos_caja.update({
-        where: { id: movCaja.id },
-        data: { monto: nuevoTotal, descripcion: `Venta #${id} (editada)` },
+    // Solo las ventas de contado tienen un movimiento de caja igual al total
+    if (esContado) {
+      const movCaja = await tx.movimientos_caja.findFirst({
+        where: { ventas_id: id, anulado: false },
       });
+      if (movCaja) {
+        await tx.movimientos_caja.update({
+          where: { id: movCaja.id },
+          data: { monto: nuevoTotal, descripcion: `Venta #${id} (editada)` },
+        });
+      }
     }
 
     return tx.ventas.update({
       where: { id },
-      data: { canal, notas, total: nuevoTotal },
+      data: { canal, notas, total: nuevoTotal, estado_pago: nuevoEstado },
     });
   });
 };
@@ -248,7 +270,7 @@ const anular = async (id, empresasId, usuariosId, motivo) => {
       where: { id, empresas_id: empresasId, anulada: false },
       include: { ventas_items: true },
     });
-    if (!venta) throw new Error("Venta no encontrada o ya anulada.");
+    if (!venta) throw noEncontrado("Venta no encontrada o ya anulada.");
 
     // Devolver stock
     for (const item of venta.ventas_items) {

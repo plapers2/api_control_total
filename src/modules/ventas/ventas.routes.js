@@ -45,9 +45,6 @@ router.post("/", async (req, res, next) => {
     });
     return created(res, venta);
   } catch (err) {
-    if (err.message?.includes("insuficiente") || err.message?.includes("Stock")) {
-      return badRequest(res, err.message);
-    }
     next(err);
   }
 });
@@ -59,7 +56,6 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
     const v = await svc.actualizar(Number(req.params.id), req.empresas_id, req.usuario.id, { canal, notas, items });
     return ok(res, v);
   } catch (err) {
-    if (err.message?.includes("insuficiente") || err.message?.includes("Stock")) return badRequest(res, err.message);
     next(err);
   }
 });
