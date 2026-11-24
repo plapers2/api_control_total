@@ -16,7 +16,7 @@ const obtenerEmpresa = async (id) => {
     include: {
       usuarios_empresas: {
         where: { activo: true },
-        include: { usuarios: true, roles: true },
+        include: { usuarios: { select: { id: true, nombre: true, email: true, activo: true } }, roles: true },
       },
     },
   });
@@ -46,7 +46,7 @@ const actualizarEmpresa = async (id, { nombre, descripcion, activa }) => {
 const listarMiembros = async (empresasId) => {
   return prisma.usuarios_empresas.findMany({
     where: { empresas_id: empresasId },
-    include: { usuarios: true, roles: true },
+    include: { usuarios: { select: { id: true, nombre: true, email: true, activo: true } }, roles: true },
   });
 };
 

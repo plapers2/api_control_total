@@ -7,6 +7,17 @@ const router = Router();
 
 router.use(authenticate);
 
+// Las rutas /empresas/:id/* solo se pueden usar sobre LA empresa del token.
+// requireRol("admin") solo mira el rol en la empresa del token, no el :id de la
+// URL: sin esta comprobación, un admin de la empresa A podía editar la B o
+// agregarse como admin de ella.
+const soloMiEmpresa = (req, res, next) => {
+  if (!req.empresas_id || Number(req.params.id) !== req.empresas_id) {
+    return res.status(403).json({ message: "No puedes administrar otra empresa." });
+  }
+  next();
+};
+
 // ── GET /empresas ────────────────────────────────────────────────────
 router.get("/", async (req, res, next) => {
   try {
@@ -18,7 +29,7 @@ router.get("/", async (req, res, next) => {
 });
 
 // ── GET /empresas/:id ─────────────────────────────────────────────────
-router.get("/:id", async (req, res, next) => {
+router.get("/:id", soloMiEmpresa, async (req, res, next) => {
   try {
     const empresa = await empresasService.obtenerEmpresa(Number(req.params.id));
     if (!empresa) return notFound(res);
@@ -29,7 +40,7 @@ router.get("/:id", async (req, res, next) => {
 });
 
 // ── PUT /empresas/:id ─────────────────────────────────────────────────
-router.put("/:id", requireRol("admin"), async (req, res, next) => {
+router.put("/:id", soloMiEmpresa, requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, descripcion, activa } = req.body;
     const empresa = await empresasService.actualizarEmpresa(Number(req.params.id), {
@@ -44,7 +55,7 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
 });
 
 // ── GET /empresas/:id/miembros ───────────────────────────────────────
-router.get("/:id/miembros", requireRol("admin"), async (req, res, next) => {
+router.get("/:id/miembros", soloMiEmpresa, requireRol("admin"), async (req, res, next) => {
   try {
     const data = await empresasService.listarMiembros(Number(req.params.id));
     return ok(res, data);
@@ -54,7 +65,7 @@ router.get("/:id/miembros", requireRol("admin"), async (req, res, next) => {
 });
 
 // ── POST /empresas/:id/miembros ──────────────────────────────────────
-router.post("/:id/miembros", requireRol("admin"), async (req, res, next) => {
+router.post("/:id/miembros", soloMiEmpresa, requireRol("admin"), async (req, res, next) => {
   try {
     const { usuarios_id, roles_id } = req.body;
     if (!usuarios_id || !roles_id) {
@@ -72,7 +83,7 @@ router.post("/:id/miembros", requireRol("admin"), async (req, res, next) => {
 });
 
 // ── DELETE /empresas/:id/miembros/:userId ────────────────────────────
-router.delete("/:id/miembros/:userId", requireRol("admin"), async (req, res, next) => {
+router.delete("/:id/miembros/:userId", soloMiEmpresa, requireRol("admin"), async (req, res, next) => {
   try {
     await empresasService.removerMiembro(Number(req.params.id), Number(req.params.userId));
     return noContent(res);

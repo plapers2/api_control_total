@@ -2,6 +2,7 @@ import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { noEncontrado } from "../../utils/errors.js";
+import { validarCliente } from "../../utils/pertenencia.js";
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
@@ -74,7 +75,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, lim
       orderBy: [{ fecha: "desc" }, { created_at: "desc" }],
       skip,
       take: Number(limit),
-      include: { clientes: true, usuarios: true, ventas_items: { include: { productos: true } } },
+      include: { clientes: true, usuarios: { select: { id: true, nombre: true } }, ventas_items: { include: { productos: true } } },
     }),
     prisma.ventas.count({ where }),
   ]);
@@ -87,7 +88,7 @@ const obtener = async (id, empresasId) =>
     where: { id, empresas_id: empresasId },
     include: {
       clientes: true,
-      usuarios: true,
+      usuarios: { select: { id: true, nombre: true } },
       ventas_items: { include: { productos: true } },
       movimientos_caja: true,
       pagos_venta: true,
@@ -96,6 +97,8 @@ const obtener = async (id, empresasId) =>
 
 const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id, items, credito, abono_inicial }) => {
   return prisma.$transaction(async (tx) => {
+    await validarCliente(tx, empresasId, clientes_id);
+
     for (const item of items) {
       const producto = await tx.productos.findFirst({
         where: { id: item.productos_id, empresas_id: empresasId, activo: true },

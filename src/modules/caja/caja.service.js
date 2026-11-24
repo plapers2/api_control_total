@@ -1,6 +1,7 @@
 import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
+import { validarInsumos } from "../../utils/pertenencia.js";
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, tipo, categoria, page = 1, limit = 10 } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
@@ -20,7 +21,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, tipo, categor
       orderBy: [{ fecha: "desc" }, { created_at: "desc" }],
       skip,
       take: Number(limit),
-      include: { usuarios: true, ventas: true },
+      include: { usuarios: { select: { id: true, nombre: true } }, ventas: true },
     }),
     prisma.movimientos_caja.count({ where }),
   ]);
@@ -88,6 +89,8 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
 
   if (insumos?.length) {
+    await validarInsumos(prisma, empresasId, insumos.map((i) => i.insumos_id));
+
     return prisma.$transaction(async (tx) => {
       const mov = await tx.movimientos_caja.create({
         data: {

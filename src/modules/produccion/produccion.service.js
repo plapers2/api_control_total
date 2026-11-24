@@ -1,6 +1,7 @@
 import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
+import { validarProductos, validarInsumos } from "../../utils/pertenencia.js";
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10 } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
@@ -19,7 +20,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, lim
       skip,
       take: Number(limit),
       include: {
-        usuarios: true,
+        usuarios: { select: { id: true, nombre: true } },
         lotes_produccion_items: { include: { productos: true } },
       },
     }),
@@ -33,15 +34,17 @@ const obtener = async (id, empresasId) =>
   prisma.lotes_produccion.findFirst({
     where: { id, empresas_id: empresasId },
     include: {
-      usuarios: true,
+      usuarios: { select: { id: true, nombre: true } },
       lotes_produccion_items: { include: { productos: true } },
       movimientos_insumos: { include: { insumos: true } },
     },
   });
 
 const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_reales }) => {
-  console.log("insumos_reales recibidos:", JSON.stringify(insumos_reales));
   return prisma.$transaction(async (tx) => {
+    await validarProductos(tx, empresasId, items.map((i) => i.productos_id));
+    await validarInsumos(tx, empresasId, (insumos_reales ?? []).map((i) => i.insumos_id));
+
     let costoTotal = 0;
     const movimientos = [];
 
@@ -198,6 +201,9 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
       },
     });
     if (!lote) throw new Error("Lote no encontrado.");
+
+    await validarProductos(tx, empresasId, items.map((i) => i.productos_id));
+    await validarInsumos(tx, empresasId, (insumos_reales ?? []).map((i) => i.insumos_id));
 
     // Revertir stock de productos producidos anteriormente
     for (const item of lote.lotes_produccion_items) {
