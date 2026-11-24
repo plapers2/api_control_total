@@ -126,6 +126,18 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
           where: { id: i.insumos_id },
           data: { stock_actual: { increment: Number(i.cantidad) } },
         });
+        // Rastro en el historial de insumos (antes el stock subía sin dejar registro).
+        // Con un solo insumo el costo es el monto del gasto; con varios no se puede repartir.
+        await tx.movimientos_insumos.create({
+          data: {
+            insumos_id: i.insumos_id,
+            tipo: "entrada",
+            cantidad: Number(i.cantidad),
+            costo_total: insumos.length === 1 && tipo === "gasto" ? Number(monto) : null,
+            nota: "Compra registrada en caja #" + mov.id,
+            usuarios_id: usuariosId,
+          },
+        });
       }
 
       return mov;

@@ -13,8 +13,9 @@ router.use(authenticate, requireEmpresa);
 router.get("/", async (req, res, next) => {
   try {
     const { periodo, desde, hasta } = req.query;
+    const productos_id = Number.isInteger(Number(req.query.productos_id)) && Number(req.query.productos_id) > 0 ? Number(req.query.productos_id) : undefined;
     const { page, limit } = leerPaginacion(req.query);
-    const { rows, count } = await svc.listar(req.empresas_id, { periodo, desde, hasta, page, limit });
+    const { rows, count } = await svc.listar(req.empresas_id, { periodo, desde, hasta, productos_id, page, limit });
     return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {
     next(err);

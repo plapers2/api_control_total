@@ -7,11 +7,23 @@ const adapter = new PrismaMariaDb(process.env.DATABASE_URL);
 const prisma = new PrismaClient({ adapter });
 
 async function main() {
+  // Usa la clave 123456 y duplica insumos en cada ejecución: solo para desarrollo.
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("El seed no se puede ejecutar con NODE_ENV=production.");
+  }
+
   // Rol
   const rol = await prisma.roles.upsert({
     where: { id: 1 },
     update: {},
     create: { id: 1, nombre: "admin" },
+  });
+
+  // Rol que usa la app para los empleados (crearEmpleado lo busca por nombre)
+  await prisma.roles.upsert({
+    where: { nombre: "empleado" },
+    update: {},
+    create: { nombre: "empleado" },
   });
 
   // Usuario

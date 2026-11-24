@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { noNegativo } from "../../utils/numeros.js";
 import { leerPaginacion } from "../../utils/paginacion.js";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest, paginate } from "../../utils/response.js";
@@ -49,6 +50,7 @@ router.post("/", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, descripcion, precio_venta, usa_energia, usa_agua, usa_gas } = req.body;
     if (!nombre) return badRequest(res, "nombre es requerido.");
+    if (!noNegativo(precio_venta)) return badRequest(res, "El precio de venta debe ser un número válido, no negativo.");
     const p = await svc.crear(req.empresas_id, {
       nombre,
       descripcion,

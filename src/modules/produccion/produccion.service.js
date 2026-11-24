@@ -5,7 +5,7 @@ import { validarProductos, validarInsumos } from "../../utils/pertenencia.js";
 import { asegurarStockNoNegativo, validarCantidadesEnteras } from "../../utils/stock.js";
 import { noEncontrado } from "../../utils/errors.js";
 
-const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10 } = {}) => {
+const listar = async (empresasId, { periodo = "dia", desde, hasta, productos_id, page = 1, limit = 10 } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
   const skip = (Number(page) - 1) * Number(limit);
 
@@ -13,6 +13,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, lim
     empresas_id: empresasId,
     anulado: false,
     ...(rangoFecha && { fecha: rangoFecha }),
+    ...(productos_id && { lotes_produccion_items: { some: { productos_id } } }),
   };
 
   const [data, total] = await Promise.all([

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { noNegativo } from "../../utils/numeros.js";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest } from "../../utils/response.js";
 import * as svc from "./insumos.service.js";
@@ -30,6 +31,7 @@ router.post("/", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, unidad_medida, stock_actual, stock_minimo, precio_unidad } = req.body;
     if (!nombre || !unidad_medida) return badRequest(res, "nombre y unidad_medida son requeridos.");
+    if (![stock_actual, stock_minimo, precio_unidad].every(noNegativo)) return badRequest(res, "Stock y precio deben ser números válidos, no negativos.");
     const insumo = await svc.crear(req.empresas_id, { nombre, unidad_medida, stock_actual, stock_minimo, precio_unidad });
     return created(res, insumo);
   } catch (err) {
