@@ -3,7 +3,9 @@ import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { validarInsumos } from "../../utils/pertenencia.js";
 import { noEncontrado } from "../../utils/errors.js";
+import { asegurarBaseInsumo, recalcularInsumo } from "../../utils/inventarioInsumos.js";
 import { resumen as resumenServicios } from "../servicios-publicos/servicios-publicos.service.js";
+import { registrarUsoCompra, actualizarUsoCompra, anularUsoCompra } from "../fondo-reposicion/fondo.service.js";
 
 // Los movimientos que nacen de una venta o de un abono (ventas_id) se corrigen
 // desde Ventas o Deudas. Editarlos o anularlos aquí descuadra la caja frente a
@@ -37,7 +39,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, tipo, categor
       orderBy: [{ fecha: "desc" }, { created_at: "desc" }, { id: "desc" }],
       skip,
       take: Number(limit),
-      include: { usuarios: { select: { id: true, nombre: true } }, ventas: true },
+      include: { usuarios: { select: { id: true, nombre: true } }, ventas: true, compra_insumos: { include: { items: { include: { insumos: true } } } } },
     }),
     prisma.movimientos_caja.count({ where }),
   ]);
@@ -95,19 +97,72 @@ const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
   };
 };
 
-// Registro manual (gastos, ajustes, etc.)
-// Si llegan insumos (array de {insumos_id, cantidad}), además del movimiento de
-// caja se suma cada cantidad al stock del insumo correspondiente (es opcional:
-// muchos gastos de "insumo" son solo control de gasto, sin inventario real).
-// tipo_servicio (energia/agua/gas) solo aplica cuando categoria = "servicio_publico".
-// Si llega en cualquier otra categoría, se ignora para no guardar basura.
+// Las compras de insumos son movimientos de Caja con detalle obligatorio.
+// Cada línea conserva cantidad y costo individual y alimenta el promedio
+// ponderado del inventario.
+const normalizarCompra = (insumos, monto) => {
+  if (!Array.isArray(insumos) || insumos.length === 0) {
+    throw Object.assign(new Error("Una compra de insumos debe incluir al menos un insumo y su cantidad y costo."), { status: 400 });
+  }
+  const ids = insumos.map((i) => Number(i.insumos_id));
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0)) throw Object.assign(new Error("Selecciona un insumo válido para cada línea de la compra."), { status: 400 });
+  if (new Set(ids).size !== ids.length) throw Object.assign(new Error("No repitas el mismo insumo en una compra; consolida su cantidad."), { status: 400 });
+  const items = insumos.map((i) => {
+    const cantidadEntrada = Number(i.cantidad);
+    const cantidad = Math.round(cantidadEntrada * 1000) / 1000;
+    const costoEntrada = Number(i.costo_unitario);
+    const costoUnitario = Math.round(costoEntrada * 10000) / 10000;
+    if (!Number.isFinite(cantidadEntrada) || cantidad <= 0 || !Number.isFinite(costoEntrada) || costoUnitario <= 0) {
+      throw Object.assign(new Error("Cada insumo debe tener cantidad y costo unitario mayores a 0."), { status: 400 });
+    }
+    return { insumos_id: Number(i.insumos_id), cantidad, costo_unitario: costoUnitario, costo_total: Math.round(cantidad * costoUnitario * 100) / 100 };
+  });
+  const total = Math.round(items.reduce((s, i) => s + i.costo_total, 0) * 100) / 100;
+  if (Math.abs(total - Number(monto)) > 0.01) {
+    throw Object.assign(new Error(`La suma de los insumos (${total.toFixed(2)}) debe coincidir con el movimiento de Caja (${Number(monto).toFixed(2)}).`), { status: 400 });
+  }
+  return items;
+};
+
+const validarSinProduccionPosterior = async (tx, items, fechaLimite) => {
+  const ids = [...new Set(items.map((i) => Number(i.insumos_id)))];
+  if (!ids.length) return;
+  const consumos = await tx.movimientos_insumos.findMany({
+    where: { insumos_id: { in: ids }, tipo: "salida", anulado: false, created_at: { gt: fechaLimite } },
+    include: { insumos: { select: { nombre: true } } },
+    take: 1,
+  });
+  if (consumos.length) {
+    throw Object.assign(new Error(`No se puede editar o anular esta compra porque el insumo "${consumos[0].insumos.nombre}" ya fue utilizado en producción. Para conservar los costos históricos, primero debes anular o corregir los lotes de producción posteriores y luego modificar la compra.`), { status: 409 });
+  }
+};
+
+const crearDetalleCompra = async (tx, mov, usuariosId, items, fecha) => {
+  const compra = await tx.compras_insumos.create({
+    data: { empresas_id: mov.empresas_id, movimientos_caja_id: mov.id, fecha: fechaColombiaToUTC(fecha), monto_total: mov.monto },
+  });
+  for (const item of items) {
+    const insumo = await tx.insumos.findFirst({ where: { id: item.insumos_id, empresas_id: mov.empresas_id, activo: true } });
+    if (!insumo) throw Object.assign(new Error(`El insumo ${item.insumos_id} no existe o no pertenece a esta empresa.`), { status: 400 });
+    await asegurarBaseInsumo(tx, insumo);
+    const detalle = await tx.compras_insumos_items.create({
+      data: { compra_id: compra.id, insumos_id: item.insumos_id, cantidad: item.cantidad, costo_unitario: item.costo_unitario, costo_total: item.costo_total },
+    });
+    await tx.movimientos_insumos.create({
+      data: { insumos_id: item.insumos_id, tipo: "entrada", cantidad: item.cantidad, costo_total: item.costo_total, compra_item_id: detalle.id, nota: `Compra registrada en caja #${mov.id}`, usuarios_id: usuariosId },
+    });
+    await recalcularInsumo(tx, item.insumos_id);
+  }
+  await registrarUsoCompra(tx, { empresasId: mov.empresas_id, compraId: compra.id, movimientoCajaId: mov.id, monto: Number(mov.monto), fecha });
+  return compra;
+};
+
 const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio, periodo_servicio }) => {
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
   let periodoServicioFinal = null;
   if (categoria === "servicio_publico") {
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(periodo_servicio ?? ""))) {
-      throw Object.assign(new Error("Selecciona el mes del recibo que vas a registrar."), { status: 400 });
-    }
+    if (tipo !== "gasto") throw Object.assign(new Error("Un servicio público debe registrarse como gasto."), { status: 400 });
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(periodo_servicio ?? ""))) throw Object.assign(new Error("Selecciona el mes del recibo que vas a registrar."), { status: 400 });
     const resumen = await resumenServicios(empresasId);
     const servicio = resumen.servicios.find((s) => s.servicio === tipoServicioFinal);
     const mes = servicio?.meses.find((m) => m.mes === periodo_servicio);
@@ -116,95 +171,75 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
     periodoServicioFinal = periodo_servicio;
   }
 
-  if (insumos?.length) {
-    await validarInsumos(
-      prisma,
-      empresasId,
-      insumos.map((i) => i.insumos_id),
-    );
-    if (insumos.some((i) => !Number.isFinite(i.cantidad) || i.cantidad <= 0)) {
-      throw Object.assign(new Error("La cantidad de cada insumo debe ser mayor a 0."), { status: 400 });
-    }
+  if (categoria === "insumo" && tipo !== "gasto") throw Object.assign(new Error("Las compras de insumos deben registrarse como gastos."), { status: 400 });
+  const itemsCompra = categoria === "insumo" ? normalizarCompra(insumos, monto) : null;
+  if (itemsCompra) await validarInsumos(prisma, empresasId, itemsCompra.map((i) => i.insumos_id));
+  if (categoria !== "insumo" && insumos?.length) throw Object.assign(new Error("Solo los gastos de categoría insumo pueden incluir productos de inventario."), { status: 400 });
 
-    return prisma.$transaction(async (tx) => {
-      const mov = await tx.movimientos_caja.create({
-        data: {
-          empresas_id: empresasId,
-          usuarios_id: usuariosId,
-          tipo,
-          categoria,
-          tipo_servicio: tipoServicioFinal,
-          periodo_servicio: periodoServicioFinal,
-          monto,
-          descripcion,
-          fecha: fechaColombiaToUTC(fecha),
-        },
-      });
-
-      for (const i of insumos) {
-        await tx.insumos.update({
-          where: { id: i.insumos_id },
-          data: { stock_actual: { increment: Number(i.cantidad) } },
-        });
-        // Rastro en el historial de insumos (antes el stock subía sin dejar registro).
-        // Con un solo insumo el costo es el monto del gasto; con varios no se puede repartir.
-        await tx.movimientos_insumos.create({
-          data: {
-            insumos_id: i.insumos_id,
-            tipo: "entrada",
-            cantidad: Number(i.cantidad),
-            costo_total: insumos.length === 1 && tipo === "gasto" ? Number(monto) : null,
-            nota: "Compra registrada en caja #" + mov.id,
-            usuarios_id: usuariosId,
-          },
-        });
-      }
-
-      return mov;
+  return prisma.$transaction(async (tx) => {
+    const mov = await tx.movimientos_caja.create({
+      data: { empresas_id: empresasId, usuarios_id: usuariosId, tipo, categoria, tipo_servicio: tipoServicioFinal, periodo_servicio: periodoServicioFinal, monto, descripcion, fecha: fechaColombiaToUTC(fecha) },
     });
-  }
-
-  return prisma.movimientos_caja.create({
-    data: {
-      empresas_id: empresasId,
-      usuarios_id: usuariosId,
-      tipo,
-      categoria,
-      tipo_servicio: tipoServicioFinal,
-      periodo_servicio: periodoServicioFinal,
-      monto,
-      descripcion,
-      fecha: fechaColombiaToUTC(fecha),
-    },
+    if (itemsCompra) await crearDetalleCompra(tx, mov, usuariosId, itemsCompra, fecha);
+    return mov;
   });
 };
 
 const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio, periodo_servicio }) => {
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
-
   return prisma.$transaction(async (tx) => {
     const mov = await tx.movimientos_caja.findFirst({
       where: { id, empresas_id: empresasId, anulado: false },
+      include: { compra_insumos: { include: { items: { include: { movimiento_insumos: true } } } } },
     });
     if (!mov) throw noEncontrado("Movimiento no encontrado.");
     rechazarSiEsDeVenta(mov);
 
-    // Si tenía insumos vinculados (categoría insumo), revertir stock
-    // Buscamos movimientos de insumos con nota que referencie este movimiento de caja
-    // Como no hay FK directa, revertimos si la categoría era insumo
-    // (el admin es responsable de la coherencia al editar)
+    if (mov.compra_insumos) {
+      if (tipo !== "gasto" || categoria !== "insumo") throw Object.assign(new Error("Una compra vinculada a inventario debe conservar el tipo gasto y la categoría insumo."), { status: 400 });
+      const items = normalizarCompra(insumos, monto);
+      await validarInsumos(tx, empresasId, items.map((i) => i.insumos_id));
+      const oldItems = mov.compra_insumos.items;
+      const limite = oldItems.reduce((min, i) => {
+        const fechaMov = i.movimiento_insumos?.created_at ?? mov.created_at;
+        return !min || fechaMov < min ? fechaMov : min;
+      }, null) ?? mov.created_at;
+      await validarSinProduccionPosterior(tx, oldItems, limite);
+      await validarSinProduccionPosterior(tx, items, limite);
 
+      const afectados = new Set([...oldItems.map((i) => i.insumos_id), ...items.map((i) => i.insumos_id)]);
+      const createdAtPorInsumo = new Map(oldItems.map((i) => [i.insumos_id, i.movimiento_insumos?.created_at]).filter(([, value]) => value));
+      for (const old of oldItems) {
+        if (old.movimiento_insumos) await tx.movimientos_insumos.update({ where: { id: old.movimiento_insumos.id }, data: { anulado: true, compra_item_id: null } });
+      }
+      await tx.compras_insumos_items.deleteMany({ where: { compra_id: mov.compra_insumos.id } });
+      await tx.compras_insumos.update({ where: { id: mov.compra_insumos.id }, data: { fecha: fechaColombiaToUTC(fecha), monto_total: monto } });
+
+      const actualizado = await tx.movimientos_caja.update({
+        where: { id },
+        data: { tipo, categoria, tipo_servicio: null, periodo_servicio: null, monto, descripcion, fecha: fechaColombiaToUTC(fecha) },
+      });
+      const compra = await tx.compras_insumos.findUnique({ where: { id: mov.compra_insumos.id } });
+      for (const item of items) {
+        const insumo = await tx.insumos.findFirst({ where: { id: item.insumos_id, empresas_id: empresasId, activo: true } });
+        if (!insumo) throw Object.assign(new Error(`El insumo ${item.insumos_id} no existe, está inactivo o no pertenece a esta empresa.`), { status: 400 });
+        await asegurarBaseInsumo(tx, insumo);
+        const detalle = await tx.compras_insumos_items.create({ data: { compra_id: compra.id, insumos_id: item.insumos_id, cantidad: item.cantidad, costo_unitario: item.costo_unitario, costo_total: item.costo_total } });
+        await tx.movimientos_insumos.create({ data: { insumos_id: item.insumos_id, tipo: "entrada", cantidad: item.cantidad, costo_total: item.costo_total, compra_item_id: detalle.id, nota: `Compra registrada en caja #${id} (editada)`, usuarios_id: mov.usuarios_id, created_at: createdAtPorInsumo.get(item.insumos_id) ?? new Date() } });
+      }
+      for (const insumoId of afectados) await recalcularInsumo(tx, insumoId);
+      await actualizarUsoCompra(tx, { empresasId, compraId: compra.id, monto: Number(monto), fecha });
+      return actualizado;
+    }
+
+    if (categoria === "insumo") throw Object.assign(new Error("No se puede convertir un movimiento existente en compra de insumos. Registra una compra nueva con su detalle de inventario."), { status: 400 });
+    if (mov.tipo === "gasto" && mov.categoria === "insumo") {
+      // Si era una compra histórica sin detalle, al cambiar su categoría deja de consumir el fondo.
+      await anularUsoCompra(tx, empresasId, null, mov.id);
+    }
     return tx.movimientos_caja.update({
       where: { id },
-      data: {
-        tipo,
-        categoria,
-        tipo_servicio: tipoServicioFinal,
-        periodo_servicio: categoria === "servicio_publico" ? (periodo_servicio ?? mov.periodo_servicio ?? null) : null,
-        monto,
-        descripcion,
-        fecha: fechaColombiaToUTC(fecha),
-      },
+      data: { tipo, categoria, tipo_servicio: tipoServicioFinal, periodo_servicio: categoria === "servicio_publico" ? (periodo_servicio ?? mov.periodo_servicio ?? null) : null, monto, descripcion, fecha: fechaColombiaToUTC(fecha) },
     });
   });
 };
@@ -213,17 +248,29 @@ const anular = async (id, empresasId, motivo) => {
   return prisma.$transaction(async (tx) => {
     const mov = await tx.movimientos_caja.findFirst({
       where: { id, empresas_id: empresasId, anulado: false },
+      include: { compra_insumos: { include: { items: { include: { movimiento_insumos: true } } } } },
     });
     if (!mov) throw noEncontrado("Movimiento no encontrado o ya anulado.");
     rechazarSiEsDeVenta(mov);
-
-    // Si era un gasto de insumo, no hay FK directa a movimientos_insumos,
-    // así que solo aplicamos borrado lógico. El admin maneja el ajuste de stock
-    // manualmente si es necesario.
-    return tx.movimientos_caja.update({
-      where: { id },
-      data: { anulado: true, motivo_anulacion: motivo },
-    });
+    if (mov.compra_insumos) {
+      const items = mov.compra_insumos.items;
+      const limite = items.reduce((min, i) => {
+        const fechaMov = i.movimiento_insumos?.created_at ?? mov.created_at;
+        return !min || fechaMov < min ? fechaMov : min;
+      }, null) ?? mov.created_at;
+      await validarSinProduccionPosterior(tx, items, limite);
+      const afectados = [...new Set(items.map((i) => i.insumos_id))];
+      for (const item of items) {
+        if (item.movimiento_insumos) await tx.movimientos_insumos.update({ where: { id: item.movimiento_insumos.id }, data: { anulado: true } });
+      }
+      await tx.compras_insumos.update({ where: { id: mov.compra_insumos.id }, data: { anulada: true } });
+      await anularUsoCompra(tx, empresasId, mov.compra_insumos.id, mov.id);
+      for (const insumoId of afectados) await recalcularInsumo(tx, insumoId);
+    } else if (mov.tipo === "gasto" && mov.categoria === "insumo") {
+      // Compatibilidad con compras históricas anteriores al detalle estructurado.
+      await anularUsoCompra(tx, empresasId, null, mov.id);
+    }
+    return tx.movimientos_caja.update({ where: { id }, data: { anulado: true, motivo_anulacion: motivo } });
   });
 };
 

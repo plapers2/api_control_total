@@ -121,6 +121,7 @@ const consumoPropioPeriodo = async (empresasId, rangoFecha, indirectos) => {
     select: {
       productos_id: true,
       cantidad: true,
+      costo_unitario: true,
       productos: { select: { usa_energia: true, usa_agua: true, usa_gas: true } },
     },
   });
@@ -135,7 +136,7 @@ const consumoPropioPeriodo = async (empresasId, rangoFecha, indirectos) => {
     costoDirecto = 0,
     costoConVariable = 0;
   for (const it of items) {
-    const directo = dPeriodo[it.productos_id] ?? dHistorico[it.productos_id] ?? 0;
+    const directo = it.costo_unitario != null ? Number(it.costo_unitario) : (dPeriodo[it.productos_id] ?? dHistorico[it.productos_id] ?? 0);
     const indirecto = SERVICIOS.filter((s) => it.productos[`usa_${s}`]).reduce((sum, s) => sum + indirectos[s].costoUnitario, 0);
     unidades += it.cantidad;
     costoDirecto += directo * it.cantidad;
@@ -167,6 +168,8 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
       productos_id: true,
       cantidad: true,
       subtotal: true,
+      costo_unitario: true,
+      estado_costo: true,
       productos: { select: { nombre: true, usa_energia: true, usa_agua: true, usa_gas: true } },
     },
   });
@@ -182,6 +185,10 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
       acumuladoVentas[v.productos_id] = {
         unidades: 0,
         ingreso: 0,
+        costoSnapshot: 0,
+        unidadesSnapshot: 0,
+        unidadesSinSnapshot: 0,
+        costoIncompleto: false,
         nombre: v.productos.nombre,
         usa_energia: v.productos.usa_energia,
         usa_agua: v.productos.usa_agua,
@@ -190,6 +197,13 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
     }
     acumuladoVentas[v.productos_id].unidades += v.cantidad;
     acumuladoVentas[v.productos_id].ingreso += Number(v.subtotal);
+    if (v.costo_unitario != null) {
+      acumuladoVentas[v.productos_id].costoSnapshot += Number(v.costo_unitario) * v.cantidad;
+      acumuladoVentas[v.productos_id].unidadesSnapshot += v.cantidad;
+    } else {
+      acumuladoVentas[v.productos_id].unidadesSinSnapshot += v.cantidad;
+    }
+    if (["incompleto", "sin_costo_verificable"].includes(v.estado_costo)) acumuladoVentas[v.productos_id].costoIncompleto = true;
   }
 
   const productosIds = Object.keys(acumuladoVentas).map(Number);
@@ -205,14 +219,15 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
     .map((id) => {
       const venta = acumuladoVentas[id];
 
-      const costoDirectoUnit = directosPeriodo[id] ?? directosHistorico[id] ?? 0;
-      const costoDirectoEstimado = directosPeriodo[id] == null;
+      const costoFallback = directosPeriodo[id] ?? directosHistorico[id] ?? 0;
+      const costoDirectoTotal = venta.costoSnapshot + costoFallback * venta.unidadesSinSnapshot;
+      const costoDirectoUnit = venta.unidades > 0 ? costoDirectoTotal / venta.unidades : 0;
+      const costoDirectoEstimado = venta.unidadesSinSnapshot > 0 || venta.costoIncompleto;
 
       const serviciosUsados = SERVICIOS.filter((s) => venta[`usa_${s}`]);
       const indirectoUnit = serviciosUsados.reduce((sum, s) => sum + indirectos[s].costoUnitario, 0);
       const indirectoEstimado = serviciosUsados.some((s) => indirectos[s].estimado);
 
-      const costoDirectoTotal = costoDirectoUnit * venta.unidades;
       const costoConVariableUnit = costoDirectoUnit + indirectoUnit;
       const costoConVariableTotal = costoConVariableUnit * venta.unidades;
 

@@ -2,6 +2,7 @@ import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { noEncontrado } from "../../utils/errors.js";
 import { moverSaldo } from "../clientes/saldo.service.js";
+import { registrarRecuperacionVenta, recalcularFondo } from "../fondo-reposicion/fondo.service.js";
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 
@@ -100,6 +101,7 @@ const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fec
         fecha: fechaColombiaToUTC(fecha),
       },
     });
+    await registrarRecuperacionVenta(tx, { empresasId, ventaId, montoCobrado: monto, fecha: fechaColombiaToUTC(fecha), pagoVentaId: pago.id, origen: "abono" });
 
     return pago;
   });
@@ -209,7 +211,7 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
       const montoVenta = aplicar / 100;
       const saldaTodo = aplicar === saldo;
 
-      await tx.pagos_venta.create({
+      const pago = await tx.pagos_venta.create({
         data: {
           ventas_id: venta.id,
           usuarios_id: usuariosId,
@@ -234,6 +236,7 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
           fecha: fechaColombiaToUTC(fecha),
         },
       });
+      await registrarRecuperacionVenta(tx, { empresasId, ventaId: venta.id, montoCobrado: montoVenta, fecha: fechaColombiaToUTC(fecha), pagoVentaId: pago.id, origen: "abono", recalcular: false });
 
       aplicados.push({
         ventas_id: venta.id,
@@ -243,6 +246,8 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
       });
       restante -= aplicar;
     }
+
+    await recalcularFondo(tx, empresasId);
 
     // Lo que sobra de pagar toda la deuda queda como saldo a favor del cliente
     let excedente = 0;

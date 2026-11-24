@@ -4,10 +4,30 @@ import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.
 import { ok, created, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./caja.service.js";
 import { requireRol } from "../../middlewares/auth.middleware.js";
+import { resumenFondo, reconstruirHistorico } from "../fondo-reposicion/fondo.service.js";
 
 const router = Router();
 
 router.use(authenticate, requireEmpresa);
+
+
+// Fondo de reposición: apartado informativo, independiente del balance de Caja.
+router.get("/fondo-resumen", async (req, res, next) => {
+  try {
+    return ok(res, await resumenFondo(req.empresas_id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Reconstrucción histórica idempotente. Solo administradores pueden ejecutarla.
+router.post("/fondo-reconstruir", requireRol("admin"), async (req, res, next) => {
+  try {
+    return ok(res, await reconstruirHistorico(req.empresas_id), "Histórico del fondo reconstruido.");
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /caja?periodo=dia|semana|mes|total&desde=YYYY-MM-DD&hasta=YYYY-MM-DD&tipo=ingreso&categoria=venta&page=1&limit=10
 // - periodo=total (o "todo") trae todo lo registrado históricamente, sin filtro de fecha.
@@ -58,7 +78,7 @@ router.post("/", async (req, res, next) => {
       descripcion,
       fecha,
       insumos: Array.isArray(insumos)
-        ? insumos.map((i) => ({ insumos_id: Number(i.insumos_id), cantidad: Number(i.cantidad) }))
+        ? insumos.map((i) => ({ insumos_id: Number(i.insumos_id), cantidad: Number(i.cantidad), costo_unitario: Number(i.costo_unitario) }))
         : undefined,
     });
     return created(res, mov);
@@ -69,7 +89,7 @@ router.post("/", async (req, res, next) => {
 
 router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
-    const { tipo, categoria, monto, descripcion, fecha, tipo_servicio, periodo_servicio } = req.body;
+    const { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio, periodo_servicio } = req.body;
     if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
     if (!(Number(monto) > 0)) return badRequest(res, "El monto debe ser un número mayor a 0.");
     if (categoria === "servicio_publico" && tipo !== "gasto") {
@@ -78,7 +98,7 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
     if (categoria === "servicio_publico" && !["energia", "agua", "gas"].includes(tipo_servicio)) {
       return badRequest(res, "tipo_servicio (energia, agua o gas) es requerido cuando la categoría es servicio_publico.");
     }
-    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, { tipo, categoria, monto, descripcion, fecha, tipo_servicio, periodo_servicio });
+    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, { tipo, categoria, monto, descripcion, fecha, tipo_servicio, periodo_servicio, insumos: Array.isArray(insumos) ? insumos.map((i) => ({ insumos_id: Number(i.insumos_id), cantidad: Number(i.cantidad), costo_unitario: Number(i.costo_unitario) })) : undefined });
     return ok(res, mov);
   } catch (err) {
     next(err);

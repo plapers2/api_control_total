@@ -5,6 +5,7 @@ import { noEncontrado } from "../../utils/errors.js";
 import { validarCliente } from "../../utils/pertenencia.js";
 import { asegurarStockNoNegativo, validarItemsVenta } from "../../utils/stock.js";
 import { moverSaldo } from "../clientes/saldo.service.js";
+import { registrarRecuperacionVenta, recalcularRecuperacionesVenta, recalcularFondo } from "../fondo-reposicion/fondo.service.js";
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
@@ -37,6 +38,22 @@ const resolverSaldoUsado = (saldoUsado, clientesId, total) => {
   if (!clientesId) throw badRequest("Para usar saldo a favor debes asignar un cliente.");
   if (centavos(n) > centavos(total)) throw badRequest("El saldo a favor no puede ser mayor al total de la venta.");
   return n;
+};
+
+const resolverCostoPromedioProducto = async (tx, producto) => {
+  if (producto.costo_promedio != null && Number(producto.costo_promedio) > 0) return { costo: Number(producto.costo_promedio), estado: producto.costo_promedio_estado || "historico_calculado" };
+  const lotes = await tx.lotes_produccion_items.findMany({
+    where: { productos_id: producto.id, lotes_produccion: { empresas_id: producto.empresas_id, anulado: false } },
+    select: { cantidad: true, costo_unitario: true },
+  });
+  const unidades = lotes.reduce((s, i) => s + Number(i.cantidad), 0);
+  if (unidades <= 0) return { costo: null, estado: "sin_costo_verificable" };
+  if (lotes.some((i) => Number(i.costo_unitario) <= 0)) return { costo: null, estado: "incompleto" };
+  const valor = lotes.reduce((s, i) => s + Number(i.cantidad) * Number(i.costo_unitario), 0);
+  if (valor <= 0) return { costo: null, estado: "sin_costo_verificable" };
+  const costo = valor / unidades;
+  await tx.productos.update({ where: { id: producto.id }, data: { costo_promedio: costo, costo_promedio_estado: "historico_calculado" } });
+  return { costo, estado: "historico_calculado" };
 };
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10, q } = {}) => {
@@ -153,6 +170,7 @@ const crear = async (
     const domicilio = resolverDomicilio(canalFinal, valor_domicilio);
     await validarCliente(tx, empresasId, clientes_id);
 
+    const costosPorProducto = new Map();
     for (const item of items) {
       const producto = await tx.productos.findFirst({
         where: { id: item.productos_id, empresas_id: empresasId, activo: true },
@@ -160,6 +178,7 @@ const crear = async (
       if (!producto) throw badRequest(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad)
         throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
+      if (!costosPorProducto.has(item.productos_id)) costosPorProducto.set(item.productos_id, await resolverCostoPromedioProducto(tx, producto));
     }
 
     const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
@@ -187,6 +206,8 @@ const crear = async (
             cantidad: i.cantidad,
             precio_unitario: i.precio_unitario,
             subtotal: Number(i.precio_unitario) * i.cantidad,
+            costo_unitario: costosPorProducto.get(i.productos_id)?.costo ?? null,
+            estado_costo: costosPorProducto.get(i.productos_id)?.estado ?? "sin_costo_verificable",
           })),
         },
       },
@@ -262,6 +283,9 @@ const crear = async (
       });
     }
 
+    if (pagadoTotal > 0) {
+      await registrarRecuperacionVenta(tx, { empresasId, ventaId: venta.id, montoCobrado: pagadoTotal, fecha: fechaColombiaToUTC(fecha), origen: "venta_inicial" });
+    }
     return venta;
   });
 };
@@ -308,6 +332,7 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
     }
 
     // Validar stock con nuevos items
+    const costosPorProducto = new Map();
     for (const item of items) {
       const producto = await tx.productos.findFirst({
         where: { id: item.productos_id, empresas_id: empresasId, activo: true },
@@ -315,6 +340,7 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
       if (!producto) throw badRequest(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad)
         throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
+      if (!costosPorProducto.has(item.productos_id)) costosPorProducto.set(item.productos_id, await resolverCostoPromedioProducto(tx, producto));
     }
 
     // Reemplazar items
@@ -326,6 +352,8 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
         cantidad: i.cantidad,
         precio_unitario: i.precio_unitario,
         subtotal: Number(i.precio_unitario) * i.cantidad,
+        costo_unitario: costosPorProducto.get(i.productos_id)?.costo ?? null,
+        estado_costo: costosPorProducto.get(i.productos_id)?.estado ?? "sin_costo_verificable",
       })),
     });
 
@@ -353,10 +381,18 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
       }
     }
 
-    return tx.ventas.update({
+    const actualizado = await tx.ventas.update({
       where: { id },
       data: { canal: canalFinal, valor_domicilio: domicilio, notas, total: nuevoTotal, estado_pago: nuevoEstado },
     });
+    if (esContado) {
+      await tx.fondo_reposicion_movimientos.updateMany({
+        where: { venta_id: id, tipo: "recuperacion", origen: "venta_inicial", anulado: false },
+        data: { monto_cobrado: nuevoTotal },
+      });
+    }
+    await recalcularRecuperacionesVenta(tx, id);
+    return actualizado;
   });
 };
 
@@ -398,10 +434,13 @@ const anular = async (id, empresasId, usuariosId, motivo) => {
       data: { anulado: true, motivo_anulacion: motivo },
     });
 
-    return tx.ventas.update({
+    const anulada = await tx.ventas.update({
       where: { id },
       data: { anulada: true, motivo_anulacion: motivo },
     });
+    await tx.fondo_reposicion_movimientos.updateMany({ where: { venta_id: id, anulado: false }, data: { anulado: true } });
+    await recalcularFondo(tx, empresasId);
+    return anulada;
   });
 };
 
