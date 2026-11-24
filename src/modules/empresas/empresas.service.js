@@ -52,19 +52,28 @@ const listarMiembros = async (empresasId) => {
 
 // ── POST /empresas/:id/miembros ──────────────────────────────────────
 // upsert = "actualiza si existe, crea si no" (equivalente a findOrCreate + update)
-const agregarMiembro = async (empresasId, { usuarios_id, roles_id }) => {
+const agregarMiembro = async (empresasId, { usuarios_id, roles_id }, usuarioActualId) => {
+  const rol = await prisma.roles.findUnique({ where: { id: Number(roles_id) } });
+  if (!rol) throw Object.assign(new Error("El rol indicado no existe."), { status: 400 });
+
+  // El admin que llama no puede quitarse su propio rol: así la empresa nunca
+  // se queda sin administrador.
+  if (Number(usuarios_id) === usuarioActualId && rol.nombre !== "admin") {
+    throw Object.assign(new Error("No puedes quitarte tu propio rol de administrador."), { status: 400 });
+  }
+
   return prisma.usuarios_empresas.upsert({
     where: {
-      usuarios_id_empresas_id: { usuarios_id, empresas_id: empresasId },
+      usuarios_id_empresas_id: { usuarios_id: Number(usuarios_id), empresas_id: empresasId },
     },
     create: {
-      usuarios_id,
+      usuarios_id: Number(usuarios_id),
       empresas_id: empresasId,
-      roles_id,
+      roles_id: rol.id,
       activo: true,
     },
     update: {
-      roles_id,
+      roles_id: rol.id,
       activo: true,
     },
   });
@@ -72,7 +81,10 @@ const agregarMiembro = async (empresasId, { usuarios_id, roles_id }) => {
 
 // ── DELETE /empresas/:id/miembros/:userId ────────────────────────────
 // Soft-delete: en vez de borrar la fila, la marcamos como inactiva.
-const removerMiembro = async (empresasId, usuariosId) => {
+const removerMiembro = async (empresasId, usuariosId, usuarioActualId) => {
+  if (usuariosId === usuarioActualId) {
+    throw Object.assign(new Error("No puedes quitarte a ti mismo de la empresa."), { status: 400 });
+  }
   return prisma.usuarios_empresas.update({
     where: {
       usuarios_id_empresas_id: { usuarios_id: usuariosId, empresas_id: empresasId },

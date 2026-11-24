@@ -75,7 +75,7 @@ router.post("/:id/miembros", soloMiEmpresa, requireRol("admin"), async (req, res
     const membresia = await empresasService.agregarMiembro(Number(req.params.id), {
       usuarios_id,
       roles_id,
-    });
+    }, req.usuario.id);
     return created(res, membresia);
   } catch (err) {
     next(err);
@@ -85,7 +85,7 @@ router.post("/:id/miembros", soloMiEmpresa, requireRol("admin"), async (req, res
 // ── DELETE /empresas/:id/miembros/:userId ────────────────────────────
 router.delete("/:id/miembros/:userId", soloMiEmpresa, requireRol("admin"), async (req, res, next) => {
   try {
-    await empresasService.removerMiembro(Number(req.params.id), Number(req.params.userId));
+    await empresasService.removerMiembro(Number(req.params.id), Number(req.params.userId), req.usuario.id);
     return noContent(res);
   } catch (err) {
     next(err);

@@ -22,6 +22,11 @@ import superadminRoutes from "./src/modules/superadmin/superadmin.routes.js";
 
 const app = express();
 
+// Detrás de un proxy inverso (Nginx, Passenger, cPanel) define TRUST_PROXY=1 en
+// el .env para que req.ip sea la IP real del cliente. Sin eso, el límite de
+// intentos de login vería a todos los usuarios como una sola IP.
+if (Number(process.env.TRUST_PROXY) > 0) app.set("trust proxy", Number(process.env.TRUST_PROXY));
+
 // ── Middlewares globales ────────────────────────────────────────────
 // CORS_ORIGINS: lista separada por comas (ej: "https://midominio.com,https://www.midominio.com").
 // Si no se define, se permite cualquier origen (útil en desarrollo).

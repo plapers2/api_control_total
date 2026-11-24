@@ -2,11 +2,12 @@ import { Router } from "express";
 import { authenticate, authenticateParaCambioPassword, requireEmpresa, requireRol } from "../../middlewares/auth.middleware.js";
 import { ok, created, badRequest } from "../../utils/response.js";
 import * as authService from "./auth.service.js";
+import { loginLimiter } from "../../middlewares/rateLimit.js";
 
 const router = Router();
 
 // ── POST /auth/login ─────────────────────────────────────────────────
-router.post("/login", async (req, res, next) => {
+router.post("/login", loginLimiter, async (req, res, next) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return badRequest(res, "email y password son requeridos.");
@@ -72,7 +73,7 @@ router.post("/usuarios", authenticate, requireEmpresa, requireRol("admin"), asyn
 // ── DELETE /auth/usuarios/:id — desactivar miembro (admin) ───────────
 router.delete("/usuarios/:id", authenticate, requireEmpresa, requireRol("admin"), async (req, res, next) => {
   try {
-    await authService.desactivarMiembro(Number(req.params.id), req.empresas_id);
+    await authService.desactivarMiembro(Number(req.params.id), req.empresas_id, req.usuario.id);
     return ok(res, null, "Miembro desactivado.");
   } catch (err) {
     next(err);

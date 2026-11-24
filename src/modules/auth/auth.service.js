@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import prisma from "../../db/prisma.js";
+import { noEncontrado } from "../../utils/errors.js";
 
 // ── Helper para generar el JWT ──────────────────────────────────────
 const generarToken = (payload) => jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || "7d" });
@@ -85,38 +86,58 @@ const obtenerPerfil = async (usuarioId) => {
 };
 
 // ── Invitar/crear un empleado en la empresa (solo admin) ─────────────
-const crearEmpleado = async ({ nombre, email, password, empresasId, rolNombre = "empleado" }) => {
-  let usuario = await prisma.usuarios.findUnique({ where: { email } });
+const ROLES_ASIGNABLES = ["admin", "empleado"];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  if (!usuario) {
-    const hash = await bcrypt.hash(password, 10);
-    usuario = await prisma.usuarios.create({
-      data: { nombre, email, password: hash },
-    });
-  }
+const crearEmpleado = async ({ nombre, email, password, empresasId, rolNombre = "empleado" }) => {
+  const error = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
+
+  nombre = String(nombre ?? "").trim();
+  email = String(email ?? "").trim().toLowerCase();
+  if (!nombre) throw error("El nombre es requerido.");
+  if (!EMAIL_RE.test(email)) throw error("El email no es válido.");
+  // Mismo mínimo que cambiarPassword
+  if (String(password ?? "").length < 8) throw error("La contraseña debe tener al menos 8 caracteres.");
+  if (!ROLES_ASIGNABLES.includes(rolNombre)) throw error("Rol no válido.");
 
   const rol = await prisma.roles.findFirst({ where: { nombre: rolNombre } });
-  if (!rol) {
-    const error = new Error(`Rol "${rolNombre}" no existe. Crea los roles primero.`);
-    error.status = 400;
-    throw error;
-  }
+  if (!rol) throw error('Rol "' + rolNombre + '" no existe. Crea los roles primero.');
 
-  const yaEsMiembro = await prisma.usuarios_empresas.findFirst({
-    where: { usuarios_id: usuario.id, empresas_id: empresasId },
+  const hash = await bcrypt.hash(password, 10); // fuera de la transacción: es lento
+
+  return prisma.$transaction(async (tx) => {
+    let usuario = await tx.usuarios.findUnique({ where: { email } });
+
+    if (!usuario) {
+      // La clave que escribe el admin es temporal: el empleado debe cambiarla
+      // en su primer ingreso (así el admin no la conoce para siempre).
+      usuario = await tx.usuarios.create({
+        data: { nombre, email, password: hash, debe_cambiar_password: true },
+      });
+    } else if (usuario.activo === false) {
+      throw error("Ese usuario está desactivado en el sistema.");
+    }
+
+    const membresia = await tx.usuarios_empresas.findFirst({
+      where: { usuarios_id: usuario.id, empresas_id: empresasId },
+    });
+    if (membresia?.activo) throw error("Este usuario ya pertenece a la empresa.");
+
+    if (membresia) {
+      // Estaba desactivado en esta empresa: se reactiva con el rol indicado
+      await tx.usuarios_empresas.update({
+        where: { id: membresia.id },
+        data: { activo: true, roles_id: rol.id },
+      });
+    } else {
+      await tx.usuarios_empresas.create({
+        data: { usuarios_id: usuario.id, empresas_id: empresasId, roles_id: rol.id },
+      });
+    }
+
+    const { password: _, ...sinPassword } = usuario;
+    return { usuario: sinPassword, rol: rolNombre, reactivado: !!membresia };
   });
-  if (yaEsMiembro) {
-    const error = new Error("Este usuario ya pertenece a la empresa.");
-    error.status = 400;
-    throw error;
-  }
-
-  await prisma.usuarios_empresas.create({
-    data: { usuarios_id: usuario.id, empresas_id: empresasId, roles_id: rol.id },
-  });
-
-  const { password: _, ...sinPassword } = usuario;
-  return { usuario: sinPassword, rol: rolNombre };
 };
 
 // ── Listar miembros de la empresa ────────────────────────────────────
@@ -127,17 +148,22 @@ const listarMiembros = async (empresasId) =>
   });
 
 // ── Desactivar miembro (sin borrar el usuario global) ────────────────
-const desactivarMiembro = async (usuariosEmpresasId, empresasId) => {
+const desactivarMiembro = async (usuariosEmpresasId, empresasId, usuarioActualId) => {
+  if (!Number.isInteger(usuariosEmpresasId) || usuariosEmpresasId <= 0) throw noEncontrado("Miembro no encontrado.");
+
   const membresia = await prisma.usuarios_empresas.findFirst({
-    where: { id: usuariosEmpresasId, empresas_id: empresasId },
+    where: { id: usuariosEmpresasId, empresas_id: empresasId, activo: true },
   });
-  if (!membresia) {
-    const error = new Error("Miembro no encontrado.");
-    error.status = 404;
-    throw error;
+  if (!membresia) throw noEncontrado("Miembro no encontrado.");
+
+  // Quien desactiva es admin de esta empresa: mientras no pueda desactivarse a
+  // sí mismo, la empresa siempre conserva al menos un administrador.
+  if (membresia.usuarios_id === usuarioActualId) {
+    throw Object.assign(new Error("No puedes desactivarte a ti mismo."), { status: 400 });
   }
+
   return prisma.usuarios_empresas.update({
-    where: { id: usuariosEmpresasId },
+    where: { id: membresia.id },
     data: { activo: false },
   });
 };
