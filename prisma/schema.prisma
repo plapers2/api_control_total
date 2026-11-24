@@ -22,6 +22,7 @@ model empresas {
   clientes          clientes[]
   ventas            ventas[]
   movimientos_caja  movimientos_caja[]
+  configuracion_servicios_publicos configuracion_servicios_publicos[]
 }
 
 model insumos {
@@ -255,6 +256,7 @@ model movimientos_caja {
   tipo             movimientos_caja_tipo
   categoria        movimientos_caja_categoria
   tipo_servicio    movimientos_caja_tipo_servicio?
+  periodo_servicio String?                    @db.VarChar(7)
   monto            Decimal                    @db.Decimal(10, 2)
   descripcion      String?                    @db.VarChar(255)
   fecha            DateTime                   @db.Date
@@ -289,6 +291,20 @@ model saldos_cliente {
   @@index([clientes_id])
   @@index([empresas_id])
   @@index([ventas_id])
+}
+
+
+model configuracion_servicios_publicos {
+  id          Int                     @id @default(autoincrement())
+  empresas_id Int
+  servicio    movimientos_caja_tipo_servicio
+  dia_pago    Int
+  created_at  DateTime                @default(now()) @db.DateTime(0)
+  updated_at  DateTime                @default(now()) @updatedAt @db.DateTime(0)
+  empresas    empresas                @relation(fields: [empresas_id], references: [id], onDelete: Cascade)
+
+  @@unique([empresas_id, servicio])
+  @@index([empresas_id])
 }
 
 enum insumos_unidad_medida {

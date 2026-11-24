@@ -3,6 +3,7 @@ import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { validarInsumos } from "../../utils/pertenencia.js";
 import { noEncontrado } from "../../utils/errors.js";
+import { resumen as resumenServicios } from "../servicios-publicos/servicios-publicos.service.js";
 
 // Los movimientos que nacen de una venta o de un abono (ventas_id) se corrigen
 // desde Ventas o Deudas. Editarlos o anularlos aquí descuadra la caja frente a
@@ -100,8 +101,20 @@ const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
 // muchos gastos de "insumo" son solo control de gasto, sin inventario real).
 // tipo_servicio (energia/agua/gas) solo aplica cuando categoria = "servicio_publico".
 // Si llega en cualquier otra categoría, se ignora para no guardar basura.
-const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio }) => {
+const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio, periodo_servicio }) => {
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
+  let periodoServicioFinal = null;
+  if (categoria === "servicio_publico") {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(periodo_servicio ?? ""))) {
+      throw Object.assign(new Error("Selecciona el mes del recibo que vas a registrar."), { status: 400 });
+    }
+    const resumen = await resumenServicios(empresasId);
+    const servicio = resumen.servicios.find((s) => s.servicio === tipoServicioFinal);
+    const mes = servicio?.meses.find((m) => m.mes === periodo_servicio);
+    if (!mes) throw Object.assign(new Error("El mes seleccionado no está dentro del periodo de control."), { status: 400 });
+    if (mes.registrado) throw Object.assign(new Error("Ese recibo ya aparece registrado. Actualiza la pantalla e intenta con otro mes."), { status: 409 });
+    periodoServicioFinal = periodo_servicio;
+  }
 
   if (insumos?.length) {
     await validarInsumos(
@@ -121,6 +134,7 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
           tipo,
           categoria,
           tipo_servicio: tipoServicioFinal,
+          periodo_servicio: periodoServicioFinal,
           monto,
           descripcion,
           fecha: fechaColombiaToUTC(fecha),
@@ -157,6 +171,7 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
       tipo,
       categoria,
       tipo_servicio: tipoServicioFinal,
+      periodo_servicio: periodoServicioFinal,
       monto,
       descripcion,
       fecha: fechaColombiaToUTC(fecha),
@@ -164,7 +179,7 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
   });
 };
 
-const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio }) => {
+const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio, periodo_servicio }) => {
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
 
   return prisma.$transaction(async (tx) => {
@@ -185,6 +200,7 @@ const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion,
         tipo,
         categoria,
         tipo_servicio: tipoServicioFinal,
+        periodo_servicio: categoria === "servicio_publico" ? (periodo_servicio ?? mov.periodo_servicio ?? null) : null,
         monto,
         descripcion,
         fecha: fechaColombiaToUTC(fecha),
