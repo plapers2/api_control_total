@@ -45,4 +45,48 @@ router.post("/:ventaId/pagos", async (req, res, next) => {
   }
 });
 
+const leerClienteId = (req) => {
+  const id = Number(req.params.clientesId);
+  return Number.isInteger(id) && id >= 0 ? id : null;
+};
+
+// GET /deudas/clientes  (una fila por cliente con su deuda total)
+router.get("/clientes", async (req, res, next) => {
+  try {
+    return ok(res, await svc.listarPorCliente(req.empresas_id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /deudas/clientes/:clientesId  (compras pendientes, la más vieja primero; 0 = sin cliente)
+router.get("/clientes/:clientesId", async (req, res, next) => {
+  try {
+    const clientesId = leerClienteId(req);
+    if (clientesId === null) return badRequest(res, "Cliente inválido.");
+    return ok(res, await svc.detalleCliente(clientesId, req.empresas_id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /deudas/clientes/:clientesId/pagos  (abono general, de la deuda más vieja a la más reciente)
+router.post("/clientes/:clientesId/pagos", async (req, res, next) => {
+  try {
+    const clientesId = leerClienteId(req);
+    if (clientesId === null) return badRequest(res, "Cliente inválido.");
+    const { monto, nota, fecha } = req.body;
+    if (!monto || !fecha) return badRequest(res, "monto y fecha son requeridos.");
+
+    const resultado = await svc.registrarPagoCliente(clientesId, req.empresas_id, req.usuario.id, {
+      monto: Number(monto),
+      nota,
+      fecha,
+    });
+    return created(res, resultado, "Abono registrado.");
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

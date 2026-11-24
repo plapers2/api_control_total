@@ -104,4 +104,144 @@ const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fec
   });
 };
 
-export { listar, resumen, registrarPago };
+const centavos = (n) => Math.round(Number(n) * 100);
+
+// Saldo en centavos (evita errores de decimales al sumar y restar)
+const saldoCentavos = (venta) => centavos(venta.total) - venta.pagos_venta.reduce((s, p) => s + centavos(p.monto), 0);
+
+// Cliente 0 = ventas a crédito sin cliente asignado
+const filtroCliente = (clientesId) => ({ clientes_id: clientesId > 0 ? clientesId : null });
+
+// Una fila por cliente con lo que debe en total
+const listarPorCliente = async (empresasId) => {
+  const ventas = await prisma.ventas.findMany({
+    where: filtroDeudas(empresasId),
+    orderBy: [{ fecha: "asc" }, { created_at: "asc" }, { id: "asc" }],
+    include: { clientes: true, pagos_venta: true },
+  });
+
+  const mapa = new Map();
+  for (const v of ventas) {
+    const saldo = saldoCentavos(v);
+    if (saldo <= 0) continue;
+    const clave = v.clientes_id ?? 0;
+    if (!mapa.has(clave)) {
+      mapa.set(clave, {
+        clientes_id: v.clientes_id,
+        nombre: v.clientes?.nombre ?? "Sin cliente",
+        telefono: v.clientes?.telefono ?? null,
+        totalDeuda: 0,
+        cantidadVentas: 0,
+        masAntigua: v.fecha,
+      });
+    }
+    const c = mapa.get(clave);
+    c.totalDeuda += saldo / 100;
+    c.cantidadVentas += 1;
+  }
+
+  return [...mapa.values()].sort((a, b) => b.totalDeuda - a.totalDeuda);
+};
+
+// Compras pendientes de un cliente, de la más vieja a la más reciente
+const ventasPendientesCliente = (tx, empresasId, clientesId) =>
+  tx.ventas.findMany({
+    where: { ...filtroDeudas(empresasId), ...filtroCliente(clientesId) },
+    orderBy: [{ fecha: "asc" }, { created_at: "asc" }, { id: "asc" }],
+    include: { pagos_venta: true, ventas_items: { include: { productos: true } } },
+  });
+
+const detalleCliente = async (clientesId, empresasId) => {
+  let cliente = { id: null, nombre: "Sin cliente", telefono: null };
+  if (clientesId > 0) {
+    const c = await prisma.clientes.findFirst({ where: { id: clientesId, empresas_id: empresasId } });
+    if (!c) throw noEncontrado("Cliente no encontrado.");
+    cliente = { id: c.id, nombre: c.nombre, telefono: c.telefono };
+  }
+
+  const ventas = (await ventasPendientesCliente(prisma, empresasId, clientesId))
+    .map((v) => {
+      const saldo = saldoCentavos(v);
+      return {
+        id: v.id,
+        fecha: v.fecha,
+        total: Number(v.total),
+        pagado: (centavos(v.total) - saldo) / 100,
+        saldo: saldo / 100,
+        estado_pago: v.estado_pago,
+        ventas_items: v.ventas_items.map((i) => ({
+          id: i.id,
+          cantidad: i.cantidad,
+          subtotal: Number(i.subtotal),
+          productos: { nombre: i.productos?.nombre },
+        })),
+      };
+    })
+    .filter((v) => v.saldo > 0);
+
+  const totalDeuda = ventas.reduce((s, v) => s + centavos(v.saldo), 0) / 100;
+  return { cliente, totalDeuda, ventas };
+};
+
+// Abono general: se reparte desde la deuda más vieja hasta la más reciente
+const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto, nota, fecha }) => {
+  if (!Number.isFinite(monto) || monto <= 0) throw badRequest("El monto del abono debe ser mayor a 0.");
+
+  return prisma.$transaction(async (tx) => {
+    const pendientes = (await ventasPendientesCliente(tx, empresasId, clientesId))
+      .map((v) => ({ venta: v, saldo: saldoCentavos(v) }))
+      .filter((x) => x.saldo > 0);
+
+    if (pendientes.length === 0) throw noEncontrado("Este cliente no tiene deudas pendientes.");
+
+    const deudaTotal = pendientes.reduce((s, x) => s + x.saldo, 0);
+    let restante = centavos(monto);
+    if (restante > deudaTotal) throw badRequest(`El abono (${monto}) es mayor a la deuda total (${deudaTotal / 100}).`);
+
+    const aplicados = [];
+    for (const { venta, saldo } of pendientes) {
+      if (restante <= 0) break;
+      const aplicar = Math.min(restante, saldo);
+      const montoVenta = aplicar / 100;
+      const saldaTodo = aplicar === saldo;
+
+      await tx.pagos_venta.create({
+        data: {
+          ventas_id: venta.id,
+          usuarios_id: usuariosId,
+          monto: montoVenta,
+          fecha: fechaColombiaToUTC(fecha),
+          nota: nota || "Abono general",
+        },
+      });
+      await tx.ventas.update({
+        where: { id: venta.id },
+        data: { estado_pago: saldaTodo ? "pagada" : "parcial" },
+      });
+      await tx.movimientos_caja.create({
+        data: {
+          empresas_id: empresasId,
+          usuarios_id: usuariosId,
+          ventas_id: venta.id,
+          tipo: "ingreso",
+          categoria: "venta",
+          monto: montoVenta,
+          descripcion: `Abono venta #${venta.id}`,
+          fecha: fechaColombiaToUTC(fecha),
+        },
+      });
+
+      aplicados.push({
+        ventas_id: venta.id,
+        monto: montoVenta,
+        saldoRestante: (saldo - aplicar) / 100,
+        estado_pago: saldaTodo ? "pagada" : "parcial",
+      });
+      restante -= aplicar;
+    }
+
+    return { monto, aplicados };
+  });
+};
+
+export { listar, resumen, registrarPago, listarPorCliente, detalleCliente, registrarPagoCliente };
