@@ -106,6 +106,44 @@ const costoDirectoPorProducto = async (empresasId, productosIds, rangoFecha) => 
   return resultado;
 };
 
+// Costo de lo que se sacó para consumo propio (ventas con canal consumo_propio).
+// No entra al ranking ni a la utilidad: se informa aparte.
+const consumoPropioPeriodo = async (empresasId, rangoFecha, indirectos) => {
+  const items = await prisma.ventas_items.findMany({
+    where: {
+      ventas: {
+        empresas_id: empresasId,
+        anulada: false,
+        canal: "consumo_propio",
+        ...(rangoFecha && { fecha: rangoFecha }),
+      },
+    },
+    select: {
+      productos_id: true,
+      cantidad: true,
+      productos: { select: { usa_energia: true, usa_agua: true, usa_gas: true } },
+    },
+  });
+  if (items.length === 0) return { unidades: 0, costoDirecto: 0, costoConVariable: 0 };
+
+  const ids = [...new Set(items.map((i) => i.productos_id))];
+  const dPeriodo = await costoDirectoPorProducto(empresasId, ids, rangoFecha);
+  const faltan = ids.filter((id) => dPeriodo[id] == null);
+  const dHistorico = faltan.length ? await costoDirectoPorProducto(empresasId, faltan, undefined) : {};
+
+  let unidades = 0,
+    costoDirecto = 0,
+    costoConVariable = 0;
+  for (const it of items) {
+    const directo = dPeriodo[it.productos_id] ?? dHistorico[it.productos_id] ?? 0;
+    const indirecto = SERVICIOS.filter((s) => it.productos[`usa_${s}`]).reduce((sum, s) => sum + indirectos[s].costoUnitario, 0);
+    unidades += it.cantidad;
+    costoDirecto += directo * it.cantidad;
+    costoConVariable += (directo + indirecto) * it.cantidad;
+  }
+  return { unidades, costoDirecto, costoConVariable };
+};
+
 // ── Rentabilidad por producto ───────────────────────────────────────────
 // Cruza lo vendido en el periodo con el costo directo (insumos) + el costo
 // indirecto prorrateado (servicios públicos), y arma el ranking con las
@@ -114,12 +152,14 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
 
   const indirectos = await calcularIndirectosConFallback(empresasId, rangoFecha);
+  const consumoPropio = await consumoPropioPeriodo(empresasId, rangoFecha, indirectos);
 
   const ventasItems = await prisma.ventas_items.findMany({
     where: {
       ventas: {
         empresas_id: empresasId,
         anulada: false,
+        canal: { not: "consumo_propio" },
         ...(rangoFecha && { fecha: rangoFecha }),
       },
     },
@@ -132,7 +172,7 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
   });
 
   if (ventasItems.length === 0) {
-    return { indirectos, productos: [] };
+    return { indirectos, productos: [], consumoPropio };
   }
 
   // Acumular unidades vendidas e ingreso por producto
@@ -195,7 +235,7 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
     })
     .sort((a, b) => b.utilidadConVariable - a.utilidadConVariable);
 
-  return { indirectos, productos };
+  return { indirectos, productos, consumoPropio };
 };
 
 export { rentabilidad };

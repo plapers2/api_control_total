@@ -8,7 +8,11 @@ import { asegurarStockNoNegativo, validarItemsVenta } from "../../utils/stock.js
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
 
-const CANALES = ["punto_venta", "domicilio", "encargo"];
+const CONSUMO = "consumo_propio";
+const CANALES = ["punto_venta", "domicilio", "encargo", CONSUMO];
+
+// Consumo propio: sale stock pero no entra dinero (precio 0, sin cliente ni crédito)
+const itemsSegunCanal = (canal, items) => (canal === CONSUMO ? items.map((i) => ({ ...i, precio_unitario: 0 })) : items);
 
 const validarCanal = (canal) => {
   if (canal !== undefined && canal !== null && !CANALES.includes(canal)) throw badRequest("Canal inválido.");
@@ -112,7 +116,15 @@ const obtener = async (id, empresasId) =>
     },
   });
 
-const crear = async (empresasId, usuariosId, { fecha, canal, valor_domicilio, notas, clientes_id, items, credito, abono_inicial }) => {
+const crear = async (
+  empresasId,
+  usuariosId,
+  { fecha, canal, valor_domicilio, notas, clientes_id: clienteEntrada, items: itemsEntrada, credito: creditoEntrada, abono_inicial },
+) => {
+  const esConsumo = canal === CONSUMO;
+  const items = itemsSegunCanal(canal, itemsEntrada);
+  const clientes_id = esConsumo ? null : clienteEntrada;
+  const credito = esConsumo ? false : creditoEntrada;
   return prisma.$transaction(async (tx) => {
     validarItemsVenta(items);
     validarCanal(canal);
@@ -208,9 +220,9 @@ const crear = async (empresasId, usuariosId, { fecha, canal, valor_domicilio, no
   });
 };
 
-const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, notas, items }) => {
+const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, notas, items: itemsEntrada }) => {
   return prisma.$transaction(async (tx) => {
-    validarItemsVenta(items);
+    validarItemsVenta(itemsEntrada);
     validarCanal(canal);
     const venta = await tx.ventas.findFirst({
       where: { id, empresas_id: empresasId, anulada: false },
@@ -219,6 +231,9 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
     if (!venta) throw noEncontrado("Venta no encontrada.");
 
     const canalFinal = canal ?? venta.canal;
+    if ((canalFinal === CONSUMO) !== (venta.canal === CONSUMO))
+      throw badRequest("No se puede pasar una venta a o desde consumo propio. Anúlala y regístrala de nuevo.");
+    const items = itemsSegunCanal(canalFinal, itemsEntrada);
     const domicilio = resolverDomicilio(canalFinal, valor_domicilio ?? venta.valor_domicilio);
     const nuevoTotal = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
 
