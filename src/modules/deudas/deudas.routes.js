@@ -75,7 +75,7 @@ router.post("/clientes/:clientesId/pagos", async (req, res, next) => {
   try {
     const clientesId = leerClienteId(req);
     if (clientesId === null) return badRequest(res, "Cliente inválido.");
-    const { monto, nota, fecha } = req.body;
+    const { monto, nota, fecha, guardar_excedente } = req.body;
     if (!monto || !fecha) return badRequest(res, "monto y fecha son requeridos.");
 
     const resultado = await svc.registrarPagoCliente(clientesId, req.empresas_id, req.usuario.id, {
