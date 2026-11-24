@@ -23,11 +23,18 @@ const actualizar = async (id, empresasId, data) => {
 };
 
 const eliminar = async (id, empresasId) => {
-  const { count } = await prisma.clientes.updateMany({
-    where: { id, empresas_id: empresasId },
-    data: { activo: false },
+  const cliente = await prisma.clientes.findFirst({ where: { id, empresas_id: empresasId } });
+  if (!cliente) throw noEncontrado("Cliente no encontrado.");
+
+  if (Number(cliente.saldo_favor) > 0)
+    throw Object.assign(new Error("El cliente tiene saldo a favor. Devuélvelo o úsalo antes de desactivarlo."), { status: 400 });
+
+  const deudas = await prisma.ventas.count({
+    where: { clientes_id: id, empresas_id: empresasId, anulada: false, estado_pago: { in: ["pendiente", "parcial"] } },
   });
-  if (count === 0) throw noEncontrado("Cliente no encontrado.");
+  if (deudas > 0) throw Object.assign(new Error("El cliente tiene deudas pendientes. Cóbralas antes de desactivarlo."), { status: 400 });
+
+  await prisma.clientes.update({ where: { id }, data: { activo: false } });
 };
 
 // Clientes activos con más de `dias` días sin comprar (o que nunca han comprado).
