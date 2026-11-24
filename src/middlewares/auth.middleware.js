@@ -53,7 +53,10 @@ const verificarToken = (permitirCambioPendiente) => async (req, res, next) => {
     if (err.name === "TokenExpiredError") {
       return res.status(401).json({ message: "Token expirado." });
     }
-    return res.status(401).json({ message: "Token inválido." });
+    if (err.name === "JsonWebTokenError" || err.name === "NotBeforeError") {
+      return res.status(401).json({ message: "Token inválido." });
+    }
+    next(err);
   }
 };
 
