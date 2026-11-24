@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { leerPaginacion } from "../../utils/paginacion.js";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./produccion.service.js";
@@ -11,7 +12,8 @@ router.use(authenticate, requireEmpresa);
 // GET /produccion?periodo=dia|semana|mes|total&desde=YYYY-MM-DD&hasta=YYYY-MM-DD&page=1&limit=10
 router.get("/", async (req, res, next) => {
   try {
-    const { periodo, desde, hasta, page, limit } = req.query;
+    const { periodo, desde, hasta } = req.query;
+    const { page, limit } = leerPaginacion(req.query);
     const { rows, count } = await svc.listar(req.empresas_id, { periodo, desde, hasta, page, limit });
     return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {

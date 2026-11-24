@@ -2,6 +2,19 @@ import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { validarInsumos } from "../../utils/pertenencia.js";
+import { noEncontrado } from "../../utils/errors.js";
+
+// Los movimientos que nacen de una venta o de un abono (ventas_id) se corrigen
+// desde Ventas o Deudas. Editarlos o anularlos aquí descuadra la caja frente a
+// pagos_venta y a las deudas.
+const rechazarSiEsDeVenta = (mov) => {
+  if (mov.ventas_id) {
+    throw Object.assign(
+      new Error("Este movimiento viene de la venta #" + mov.ventas_id + ". Para corregirlo, edita o anula la venta."),
+      { status: 400 },
+    );
+  }
+};
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, tipo, categoria, page = 1, limit = 10 } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
@@ -18,7 +31,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, tipo, categor
   const [rows, count] = await Promise.all([
     prisma.movimientos_caja.findMany({
       where,
-      orderBy: [{ fecha: "desc" }, { created_at: "desc" }],
+      orderBy: [{ fecha: "desc" }, { created_at: "desc" }, { id: "desc" }],
       skip,
       take: Number(limit),
       include: { usuarios: { select: { id: true, nombre: true } }, ventas: true },
@@ -90,6 +103,9 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
 
   if (insumos?.length) {
     await validarInsumos(prisma, empresasId, insumos.map((i) => i.insumos_id));
+    if (insumos.some((i) => !Number.isFinite(i.cantidad) || i.cantidad <= 0)) {
+      throw Object.assign(new Error("La cantidad de cada insumo debe ser mayor a 0."), { status: 400 });
+    }
 
     return prisma.$transaction(async (tx) => {
       const mov = await tx.movimientos_caja.create({
@@ -137,7 +153,8 @@ const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion,
     const mov = await tx.movimientos_caja.findFirst({
       where: { id, empresas_id: empresasId, anulado: false },
     });
-    if (!mov) throw new Error("Movimiento no encontrado.");
+    if (!mov) throw noEncontrado("Movimiento no encontrado.");
+    rechazarSiEsDeVenta(mov);
 
     // Si tenía insumos vinculados (categoría insumo), revertir stock
     // Buscamos movimientos de insumos con nota que referencie este movimiento de caja
@@ -163,7 +180,8 @@ const anular = async (id, empresasId, motivo) => {
     const mov = await tx.movimientos_caja.findFirst({
       where: { id, empresas_id: empresasId, anulado: false },
     });
-    if (!mov) throw new Error("Movimiento no encontrado o ya anulado.");
+    if (!mov) throw noEncontrado("Movimiento no encontrado o ya anulado.");
+    rechazarSiEsDeVenta(mov);
 
     // Si era un gasto de insumo, no hay FK directa a movimientos_insumos,
     // así que solo aplicamos borrado lógico. El admin maneja el ajuste de stock

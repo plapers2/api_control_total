@@ -24,7 +24,7 @@ const listar = async (empresasId, { page = 1, limit = 10 } = {}) => {
   const [rows, count] = await Promise.all([
     prisma.ventas.findMany({
       where,
-      orderBy: [{ fecha: "desc" }, { created_at: "desc" }],
+      orderBy: [{ fecha: "desc" }, { created_at: "desc" }, { id: "desc" }],
       skip,
       take: Number(limit),
       include: { clientes: true, pagos_venta: true },

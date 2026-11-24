@@ -2,6 +2,8 @@ import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { validarProductos, validarInsumos } from "../../utils/pertenencia.js";
+import { asegurarStockNoNegativo, validarCantidadesEnteras } from "../../utils/stock.js";
+import { noEncontrado } from "../../utils/errors.js";
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10 } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
@@ -16,7 +18,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, lim
   const [data, total] = await Promise.all([
     prisma.lotes_produccion.findMany({
       where,
-      orderBy: { fecha: "desc" },
+      orderBy: [{ fecha: "desc" }, { created_at: "desc" }, { id: "desc" }],
       skip,
       take: Number(limit),
       include: {
@@ -42,6 +44,7 @@ const obtener = async (id, empresasId) =>
 
 const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_reales }) => {
   return prisma.$transaction(async (tx) => {
+    validarCantidadesEnteras(items);
     await validarProductos(tx, empresasId, items.map((i) => i.productos_id));
     await validarInsumos(tx, empresasId, (insumos_reales ?? []).map((i) => i.insumos_id));
 
@@ -149,6 +152,8 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
     // o repartido proporcionalmente entre todas las unidades del lote si el
     // costo se registró con insumos_reales (no hay forma de saber qué insumo
     // fue para cuál producto en ese caso, así que se usa el promedio del lote).
+    await asegurarStockNoNegativo(tx, { insumos: movimientos.map((m) => m.insumos_id) });
+
     const totalUnidadesLote = items.reduce((s, i) => s + Number(i.cantidad), 0);
     const costoUnitarioPromedioLote = totalUnidadesLote > 0 ? costoTotal / totalUnidadesLote : 0;
 
@@ -200,8 +205,9 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
         movimientos_insumos: true,
       },
     });
-    if (!lote) throw new Error("Lote no encontrado.");
+    if (!lote) throw noEncontrado("Lote no encontrado.");
 
+    validarCantidadesEnteras(items);
     await validarProductos(tx, empresasId, items.map((i) => i.productos_id));
     await validarInsumos(tx, empresasId, (insumos_reales ?? []).map((i) => i.insumos_id));
 
@@ -316,6 +322,8 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
       }
     }
 
+    await asegurarStockNoNegativo(tx, { insumos: movimientos.map((m) => m.insumos_id) });
+
     const totalUnidadesLote = items.reduce((s, i) => s + Number(i.cantidad), 0);
     const costoUnitarioPromedioLote = totalUnidadesLote > 0 ? costoTotal / totalUnidadesLote : 0;
 
@@ -344,6 +352,15 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
       });
     }
 
+    await asegurarStockNoNegativo(
+      tx,
+      { productos: [...lote.lotes_produccion_items, ...items].map((i) => i.productos_id) },
+      {
+        mensajeProducto: (p) =>
+          'No se puede editar el lote: ya se vendieron unidades de "' + p.nombre + '" y el stock quedaría en ' + p.stock_actual + ". Ajusta o anula esas ventas primero.",
+      },
+    );
+
     return tx.lotes_produccion.update({
       where: { id },
       data: { notas, costo_total: costoTotal },
@@ -357,7 +374,7 @@ const anular = async (id, empresasId, motivo) => {
       where: { id, empresas_id: empresasId, anulado: false },
       include: { lotes_produccion_items: true, movimientos_insumos: true },
     });
-    if (!lote) throw new Error("Lote no encontrado o ya anulado.");
+    if (!lote) throw noEncontrado("Lote no encontrado o ya anulado.");
 
     // Revertir stock de productos
     for (const item of lote.lotes_produccion_items) {
@@ -366,6 +383,15 @@ const anular = async (id, empresasId, motivo) => {
         data: { stock_actual: { decrement: item.cantidad } },
       });
     }
+
+    await asegurarStockNoNegativo(
+      tx,
+      { productos: lote.lotes_produccion_items.map((i) => i.productos_id) },
+      {
+        mensajeProducto: (p) =>
+          'No se puede anular el lote: ya se vendieron unidades de "' + p.nombre + '" y el stock quedaría en ' + p.stock_actual + ". Ajusta o anula esas ventas primero.",
+      },
+    );
 
     // Devolver insumos
     for (const mov of lote.movimientos_insumos) {

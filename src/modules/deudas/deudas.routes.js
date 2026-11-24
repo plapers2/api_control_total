@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { leerPaginacion } from "../../utils/paginacion.js";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./deudas.service.js";
@@ -9,7 +10,7 @@ router.use(authenticate, requireEmpresa);
 // GET /deudas?page=1&limit=10
 router.get("/", async (req, res, next) => {
   try {
-    const { page, limit } = req.query;
+    const { page, limit } = leerPaginacion(req.query);
     const { rows, count } = await svc.listar(req.empresas_id, { page, limit });
     return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {

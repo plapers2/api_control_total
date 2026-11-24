@@ -3,6 +3,7 @@ import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { noEncontrado } from "../../utils/errors.js";
 import { validarCliente } from "../../utils/pertenencia.js";
+import { asegurarStockNoNegativo, validarItemsVenta } from "../../utils/stock.js";
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
@@ -72,7 +73,7 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, lim
   const [rows, count] = await Promise.all([
     prisma.ventas.findMany({
       where,
-      orderBy: [{ fecha: "desc" }, { created_at: "desc" }],
+      orderBy: [{ fecha: "desc" }, { created_at: "desc" }, { id: "desc" }],
       skip,
       take: Number(limit),
       include: { clientes: true, usuarios: { select: { id: true, nombre: true } }, ventas_items: { include: { productos: true } } },
@@ -97,6 +98,7 @@ const obtener = async (id, empresasId) =>
 
 const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id, items, credito, abono_inicial }) => {
   return prisma.$transaction(async (tx) => {
+    validarItemsVenta(items);
     await validarCliente(tx, empresasId, clientes_id);
 
     for (const item of items) {
@@ -141,6 +143,9 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
         data: { stock_actual: { decrement: item.cantidad } },
       });
     }
+
+    // Red de seguridad (crear): un producto repetido en dos líneas no puede dejar el stock en negativo
+    await asegurarStockNoNegativo(tx, { productos: items.map((i) => i.productos_id) });
 
     if (montoAbono > 0) {
       await tx.movimientos_caja.create({
@@ -246,6 +251,9 @@ const actualizar = async (id, empresasId, usuariosId, { canal, notas, items }) =
         data: { stock_actual: { decrement: item.cantidad } },
       });
     }
+
+    // Red de seguridad (editar): el stock final de los productos no puede quedar en negativo
+    await asegurarStockNoNegativo(tx, { productos: items.map((i) => i.productos_id) });
 
     // Solo las ventas de contado tienen un movimiento de caja igual al total
     if (esContado) {

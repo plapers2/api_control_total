@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { leerPaginacion } from "../../utils/paginacion.js";
 import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
 import { ok, created, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./caja.service.js";
@@ -13,7 +14,8 @@ router.use(authenticate, requireEmpresa);
 // - desde/hasta (ambos) definen un rango personalizado y tienen prioridad sobre periodo.
 router.get("/", async (req, res, next) => {
   try {
-    const { periodo, desde, hasta, tipo, categoria, page, limit } = req.query;
+    const { periodo, desde, hasta, tipo, categoria } = req.query;
+    const { page, limit } = leerPaginacion(req.query);
     const { rows, count } = await svc.listar(req.empresas_id, { periodo, desde, hasta, tipo, categoria, page, limit });
     return paginate(res, rows, count, page || 1, limit || 10);
   } catch (err) {
@@ -39,6 +41,7 @@ router.post("/", async (req, res, next) => {
   try {
     const { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio } = req.body;
     if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
+    if (!(Number(monto) > 0)) return badRequest(res, "El monto debe ser un número mayor a 0.");
     if (categoria === "servicio_publico" && !["energia", "agua", "gas"].includes(tipo_servicio)) {
       return badRequest(res, "tipo_servicio (energia, agua o gas) es requerido cuando la categoría es servicio_publico.");
     }
@@ -64,6 +67,7 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     const { tipo, categoria, monto, descripcion, fecha, tipo_servicio } = req.body;
     if (!tipo || !categoria || !monto || !fecha) return badRequest(res, "tipo, categoria, monto y fecha son requeridos.");
+    if (!(Number(monto) > 0)) return badRequest(res, "El monto debe ser un número mayor a 0.");
     if (categoria === "servicio_publico" && !["energia", "agua", "gas"].includes(tipo_servicio)) {
       return badRequest(res, "tipo_servicio (energia, agua o gas) es requerido cuando la categoría es servicio_publico.");
     }
