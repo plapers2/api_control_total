@@ -195,6 +195,7 @@ model ventas {
   clientes_id      Int?
   canal            ventas_canal       @default(punto_venta)
   total            Decimal            @default(0.00) @db.Decimal(10, 2)
+  valor_domicilio  Decimal            @default(0.00) @db.Decimal(10, 2)
   estado_pago      ventas_estado_pago @default(pagada)
   notas            String?            @db.Text
   fecha            DateTime           @db.Date

@@ -32,13 +32,14 @@ router.get("/:id", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { fecha, canal, notas, clientes_id, items, credito, abono_inicial } = req.body;
+    const { fecha, canal, valor_domicilio, notas, clientes_id, items, credito, abono_inicial } = req.body;
     if (!fecha || !Array.isArray(items) || !items.length) return badRequest(res, "fecha e items son requeridos.");
     if (credito && !clientes_id) return badRequest(res, "Para ventas a crédito debes asignar un cliente.");
 
     const venta = await svc.crear(req.empresas_id, req.usuario.id, {
       fecha,
       canal,
+      valor_domicilio,
       notas,
       clientes_id,
       items,
@@ -53,9 +54,9 @@ router.post("/", async (req, res, next) => {
 
 router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
-    const { canal, notas, items } = req.body;
+    const { canal, valor_domicilio, notas, items } = req.body;
     if (!Array.isArray(items) || !items.length) return badRequest(res, "items es requerido.");
-    const v = await svc.actualizar(Number(req.params.id), req.empresas_id, req.usuario.id, { canal, notas, items });
+    const v = await svc.actualizar(Number(req.params.id), req.empresas_id, req.usuario.id, { canal, valor_domicilio, notas, items });
     return ok(res, v);
   } catch (err) {
     next(err);

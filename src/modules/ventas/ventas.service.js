@@ -8,6 +8,22 @@ import { asegurarStockNoNegativo, validarItemsVenta } from "../../utils/stock.js
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
 
+const CANALES = ["punto_venta", "domicilio", "encargo"];
+
+const validarCanal = (canal) => {
+  if (canal !== undefined && canal !== null && !CANALES.includes(canal)) throw badRequest("Canal inválido.");
+};
+
+// El domicilio solo cuenta cuando el canal es "domicilio"; en los demás canales vale 0.
+// Se suma al total de la venta (y por tanto a caja y a las deudas), pero no a ventas_items,
+// así que no infla la rentabilidad de los productos.
+const resolverDomicilio = (canal, valor) => {
+  if (canal !== "domicilio") return 0;
+  const n = Number(valor ?? 0);
+  if (!Number.isFinite(n) || n < 0) throw badRequest("El valor del domicilio debe ser un número válido, no negativo.");
+  return n;
+};
+
 const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10, q } = {}) => {
   const rangoFecha = construirRangoFecha({ periodo, desde, hasta });
   const skip = (Number(page) - 1) * Number(limit);
@@ -96,9 +112,12 @@ const obtener = async (id, empresasId) =>
     },
   });
 
-const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id, items, credito, abono_inicial }) => {
+const crear = async (empresasId, usuariosId, { fecha, canal, valor_domicilio, notas, clientes_id, items, credito, abono_inicial }) => {
   return prisma.$transaction(async (tx) => {
     validarItemsVenta(items);
+    validarCanal(canal);
+    const canalFinal = canal ?? "punto_venta";
+    const domicilio = resolverDomicilio(canalFinal, valor_domicilio);
     await validarCliente(tx, empresasId, clientes_id);
 
     for (const item of items) {
@@ -110,7 +129,7 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
         throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
     }
 
-    const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0);
+    const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
     const esCredito = !!credito;
     const montoAbono = esCredito ? Math.min(Number(abono_inicial || 0), total) : total;
     const estadoPago = !esCredito || montoAbono >= total ? "pagada" : montoAbono > 0 ? "parcial" : "pendiente";
@@ -120,7 +139,8 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
         empresas_id: empresasId,
         usuarios_id: usuariosId,
         clientes_id: clientes_id ?? null,
-        canal: canal ?? "punto_venta",
+        canal: canalFinal,
+        valor_domicilio: domicilio,
         fecha: fechaColombiaToUTC(fecha),
         notas,
         total,
@@ -188,15 +208,19 @@ const crear = async (empresasId, usuariosId, { fecha, canal, notas, clientes_id,
   });
 };
 
-const actualizar = async (id, empresasId, usuariosId, { canal, notas, items }) => {
+const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, notas, items }) => {
   return prisma.$transaction(async (tx) => {
+    validarItemsVenta(items);
+    validarCanal(canal);
     const venta = await tx.ventas.findFirst({
       where: { id, empresas_id: empresasId, anulada: false },
       include: { ventas_items: true, pagos_venta: true },
     });
     if (!venta) throw noEncontrado("Venta no encontrada.");
 
-    const nuevoTotal = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0);
+    const canalFinal = canal ?? venta.canal;
+    const domicilio = resolverDomicilio(canalFinal, valor_domicilio ?? venta.valor_domicilio);
+    const nuevoTotal = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
 
     // ¿Cuánto se ha cobrado ya?
     // - Venta de contado (o a crédito pagada al crear): no tiene filas en pagos_venta,
@@ -270,7 +294,7 @@ const actualizar = async (id, empresasId, usuariosId, { canal, notas, items }) =
 
     return tx.ventas.update({
       where: { id },
-      data: { canal, notas, total: nuevoTotal, estado_pago: nuevoEstado },
+      data: { canal: canalFinal, valor_domicilio: domicilio, notas, total: nuevoTotal, estado_pago: nuevoEstado },
     });
   });
 };
