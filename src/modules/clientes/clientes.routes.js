@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.js";
+import { authenticate, requireEmpresa, requireRol } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest } from "../../utils/response.js";
 import * as svc from "./clientes.service.js";
 
@@ -46,7 +46,7 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-router.put("/:id", async (req, res, next) => {
+router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     const { nombre, telefono, direccion, notas, activo } = req.body;
     return ok(res, await svc.actualizar(Number(req.params.id), req.empresas_id, { nombre, telefono, direccion, notas, activo }));
@@ -55,7 +55,7 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     await svc.eliminar(Number(req.params.id), req.empresas_id);
     return ok(res, null, "Cliente desactivado.");
