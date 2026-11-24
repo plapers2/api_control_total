@@ -9,10 +9,12 @@ import { noEncontrado } from "../../utils/errors.js";
 // pagos_venta y a las deudas.
 const rechazarSiEsDeVenta = (mov) => {
   if (mov.ventas_id) {
-    throw Object.assign(
-      new Error("Este movimiento viene de la venta #" + mov.ventas_id + ". Para corregirlo, edita o anula la venta."),
-      { status: 400 },
-    );
+    throw Object.assign(new Error("Este movimiento viene de la venta #" + mov.ventas_id + ". Para corregirlo, edita o anula la venta."), {
+      status: 400,
+    });
+  }
+  if (mov.clientes_id) {
+    throw Object.assign(new Error("Este movimiento es saldo a favor de un cliente. Corrígelo desde Clientes."), { status: 400 });
   }
 };
 
@@ -102,7 +104,11 @@ const registrar = async (empresasId, usuariosId, { tipo, categoria, monto, descr
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
 
   if (insumos?.length) {
-    await validarInsumos(prisma, empresasId, insumos.map((i) => i.insumos_id));
+    await validarInsumos(
+      prisma,
+      empresasId,
+      insumos.map((i) => i.insumos_id),
+    );
     if (insumos.some((i) => !Number.isFinite(i.cantidad) || i.cantidad <= 0)) {
       throw Object.assign(new Error("La cantidad de cada insumo debe ser mayor a 0."), { status: 400 });
     }

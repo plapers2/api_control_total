@@ -184,6 +184,8 @@ model clientes {
   updated_at                DateTime  @default(now()) @updatedAt @db.DateTime(0)
   empresas                  empresas  @relation(fields: [empresas_id], references: [id], onDelete: Cascade, map: "clientes_ibfk_1")
   ventas                    ventas[]
+  saldo_favor               Decimal   @default(0.00) @db.Decimal(10, 2)
+  saldos_cliente            saldos_cliente[]
 
   @@index([empresas_id], map: "fk_clientes_empresas")
 }
@@ -249,6 +251,7 @@ model movimientos_caja {
   empresas_id      Int
   usuarios_id      Int
   ventas_id        Int?
+  clientes_id      Int?
   tipo             movimientos_caja_tipo
   categoria        movimientos_caja_categoria
   tipo_servicio    movimientos_caja_tipo_servicio?
@@ -265,8 +268,27 @@ model movimientos_caja {
   @@index([empresas_id], map: "fk_movcaja_empresas")
   @@index([usuarios_id], map: "fk_movcaja_usuarios")
   @@index([ventas_id], map: "fk_movcaja_ventas")
+  @@index([clientes_id], map: "idx_movcaja_clientes")
   @@index([empresas_id, anulado, tipo], map: "idx_movcaja_balance")
   @@index([empresas_id, anulado, fecha], map: "idx_movcaja_fecha")
+}
+
+model saldos_cliente {
+  id          Int                  @id @default(autoincrement())
+  empresas_id Int
+  clientes_id Int
+  usuarios_id Int
+  ventas_id   Int?
+  tipo        saldos_cliente_tipo
+  monto       Decimal              @db.Decimal(10, 2)
+  nota        String?              @db.VarChar(255)
+  fecha       DateTime             @db.Date
+  created_at  DateTime             @default(now()) @db.DateTime(0)
+  clientes    clientes             @relation(fields: [clientes_id], references: [id], onDelete: Cascade)
+
+  @@index([clientes_id])
+  @@index([empresas_id])
+  @@index([ventas_id])
 }
 
 enum insumos_unidad_medida {
@@ -313,4 +335,11 @@ enum ventas_estado_pago {
   pagada
   pendiente
   parcial
+}
+
+enum saldos_cliente_tipo {
+  deposito
+  uso
+  devolucion
+  reintegro
 }

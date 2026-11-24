@@ -4,6 +4,7 @@ import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { noEncontrado } from "../../utils/errors.js";
 import { validarCliente } from "../../utils/pertenencia.js";
 import { asegurarStockNoNegativo, validarItemsVenta } from "../../utils/stock.js";
+import { moverSaldo } from "../clientes/saldo.service.js";
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
@@ -25,6 +26,16 @@ const resolverDomicilio = (canal, valor) => {
   if (canal !== "domicilio") return 0;
   const n = Number(valor ?? 0);
   if (!Number.isFinite(n) || n < 0) throw badRequest("El valor del domicilio debe ser un número válido, no negativo.");
+  return n;
+};
+
+// Saldo a favor que se descuenta de la venta: requiere cliente y no puede pasar del total
+const resolverSaldoUsado = (saldoUsado, clientesId, total) => {
+  const n = Number(saldoUsado ?? 0);
+  if (!Number.isFinite(n) || n < 0) throw badRequest("El saldo a favor a usar no es válido.");
+  if (n === 0) return 0;
+  if (!clientesId) throw badRequest("Para usar saldo a favor debes asignar un cliente.");
+  if (centavos(n) > centavos(total)) throw badRequest("El saldo a favor no puede ser mayor al total de la venta.");
   return n;
 };
 
@@ -142,9 +153,12 @@ const crear = async (
     }
 
     const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
+    const usado = resolverSaldoUsado(saldo_usado, clientes_id, total);
+    const restante = total - usado;
     const esCredito = !!credito;
-    const montoAbono = esCredito ? Math.min(Number(abono_inicial || 0), total) : total;
-    const estadoPago = !esCredito || montoAbono >= total ? "pagada" : montoAbono > 0 ? "parcial" : "pendiente";
+    const montoAbono = esCredito ? Math.min(Number(abono_inicial || 0), restante) : restante;
+    const pagadoTotal = usado + montoAbono;
+    const estadoPago = centavos(pagadoTotal) >= centavos(total) ? "pagada" : pagadoTotal > 0 ? "parcial" : "pendiente";
 
     const venta = await tx.ventas.create({
       data: {
@@ -188,22 +202,44 @@ const crear = async (
           tipo: "ingreso",
           categoria: "venta",
           monto: montoAbono,
-          descripcion: estadoPago === "pagada" ? `Venta #${venta.id}` : `Abono inicial venta #${venta.id}`,
+          descripcion:
+            estadoPago !== "pagada"
+              ? `Abono inicial venta #${venta.id}`
+              : usado > 0
+                ? `Venta #${venta.id} (resto con saldo a favor)`
+                : `Venta #${venta.id}`,
           fecha: fechaColombiaToUTC(fecha),
         },
       });
+    }
 
-      if (esCredito && estadoPago !== "pagada") {
-        await tx.pagos_venta.create({
-          data: {
-            ventas_id: venta.id,
-            usuarios_id: usuariosId,
-            monto: montoAbono,
-            fecha: fechaColombiaToUTC(fecha),
-            nota: "Abono inicial",
-          },
-        });
-      }
+    // Saldo a favor: se descuenta del cliente y queda como pago de la venta. No genera
+    // ingreso en caja: ese dinero ya entró cuando el cliente lo dejó.
+    if (usado > 0) {
+      await tx.pagos_venta.create({
+        data: { ventas_id: venta.id, usuarios_id: usuariosId, monto: usado, fecha: fechaColombiaToUTC(fecha), nota: "Saldo a favor" },
+      });
+      await moverSaldo(tx, {
+        empresasId,
+        clientesId: clientes_id,
+        usuariosId,
+        ventasId: venta.id,
+        tipo: "uso",
+        monto: usado,
+        nota: `Venta #${venta.id}`,
+        fecha: fechaColombiaToUTC(fecha),
+      });
+    }
+    if (montoAbono > 0 && ((esCredito && estadoPago !== "pagada") || usado > 0)) {
+      await tx.pagos_venta.create({
+        data: {
+          ventas_id: venta.id,
+          usuarios_id: usuariosId,
+          monto: montoAbono,
+          fecha: fechaColombiaToUTC(fecha),
+          nota: esCredito ? "Abono inicial" : "Pago al registrar",
+        },
+      });
     }
 
     // El cliente volvió a comprar: si tenía el aviso de inactividad marcado
@@ -327,6 +363,22 @@ const anular = async (id, empresasId, usuariosId, motivo) => {
       await tx.productos.update({
         where: { id: item.productos_id },
         data: { stock_actual: { increment: item.cantidad } },
+      });
+    }
+
+    // Devolver al cliente el saldo a favor que se usó en esta venta
+    const usos = await tx.saldos_cliente.findMany({ where: { ventas_id: id, tipo: "uso" } });
+    const devolver = usos.reduce((s, u) => s + centavos(u.monto), 0);
+    if (devolver > 0 && venta.clientes_id) {
+      await moverSaldo(tx, {
+        empresasId,
+        clientesId: venta.clientes_id,
+        usuariosId,
+        ventasId: id,
+        tipo: "reintegro",
+        monto: devolver / 100,
+        nota: `Venta #${id} anulada`,
+        fecha: new Date(),
       });
     }
 

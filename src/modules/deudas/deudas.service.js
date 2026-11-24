@@ -1,6 +1,7 @@
 import prisma from "../../db/prisma.js";
 import { fechaColombiaToUTC } from "../../utils/timezone.js";
 import { noEncontrado } from "../../utils/errors.js";
+import { moverSaldo } from "../clientes/saldo.service.js";
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 
@@ -184,7 +185,7 @@ const detalleCliente = async (clientesId, empresasId) => {
 };
 
 // Abono general: se reparte desde la deuda más vieja hasta la más reciente
-const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto, nota, fecha }) => {
+const registrarPagoCliente = async (clientesId, empresasId, usuariosId, guardar_excedente, { monto, nota, fecha }) => {
   if (!Number.isFinite(monto) || monto <= 0) throw badRequest("El monto del abono debe ser mayor a 0.");
 
   return prisma.$transaction(async (tx) => {
@@ -196,7 +197,10 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
 
     const deudaTotal = pendientes.reduce((s, x) => s + x.saldo, 0);
     let restante = centavos(monto);
-    if (restante > deudaTotal) throw badRequest(`El abono (${monto}) es mayor a la deuda total (${deudaTotal / 100}).`);
+    if (restante > deudaTotal) {
+      if (!guardar_excedente) throw badRequest(`El abono (${monto}) es mayor a la deuda total (${deudaTotal / 100}).`);
+      if (!(clientesId > 0)) throw badRequest("Sin cliente asignado no se puede dejar saldo a favor.");
+    }
 
     const aplicados = [];
     for (const { venta, saldo } of pendientes) {
@@ -240,7 +244,34 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
       restante -= aplicar;
     }
 
-    return { monto, aplicados };
+    // Lo que sobra de pagar toda la deuda queda como saldo a favor del cliente
+    let excedente = 0;
+    if (restante > 0) {
+      excedente = restante / 100;
+      await moverSaldo(tx, {
+        empresasId,
+        clientesId,
+        usuariosId,
+        tipo: "deposito",
+        monto: excedente,
+        nota: "Excedente de abono general",
+        fecha: fechaColombiaToUTC(fecha),
+      });
+      await tx.movimientos_caja.create({
+        data: {
+          empresas_id: empresasId,
+          usuarios_id: usuariosId,
+          clientes_id: clientesId,
+          tipo: "ingreso",
+          categoria: "otro",
+          monto: excedente,
+          descripcion: "Saldo a favor (excedente de abono)",
+          fecha: fechaColombiaToUTC(fecha),
+        },
+      });
+    }
+
+    return { monto, aplicados, excedente };
   });
 };
 

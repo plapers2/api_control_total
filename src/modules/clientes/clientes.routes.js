@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authenticate, requireEmpresa, requireRol } from "../../middlewares/auth.middleware.js";
 import { ok, created, notFound, badRequest } from "../../utils/response.js";
 import * as svc from "./clientes.service.js";
+import * as saldo from "./saldo.service.js";
 
 const router = Router();
 
@@ -75,5 +76,36 @@ router.patch("/:id/aviso", async (req, res, next) => {
     next(err);
   }
 });
+
+// GET /clientes/:id/saldo — saldo a favor e historial de movimientos
+router.get("/:id/saldo", async (req, res, next) => {
+  try {
+    return ok(res, await saldo.obtenerSaldo(Number(req.params.id), req.empresas_id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+const manejarSaldo = (tipo) => async (req, res, next) => {
+  try {
+    const { monto, nota, fecha, registrar_en_caja } = req.body;
+    if (!monto || !fecha) return badRequest(res, "monto y fecha son requeridos.");
+    const r = await saldo.registrarSaldo(Number(req.params.id), req.empresas_id, req.usuario.id, {
+      tipo,
+      monto: Number(monto),
+      nota,
+      fecha,
+      registrarEnCaja: registrar_en_caja !== false,
+    });
+    return created(res, r, tipo === "deposito" ? "Saldo a favor registrado." : "Devolución registrada.");
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /clientes/:id/saldo — dejar saldo a favor
+router.post("/:id/saldo", manejarSaldo("deposito"));
+// POST /clientes/:id/saldo/devolucion — devolver dinero al cliente (solo admin)
+router.post("/:id/saldo/devolucion", requireRol("admin"), manejarSaldo("devolucion"));
 
 export default router;

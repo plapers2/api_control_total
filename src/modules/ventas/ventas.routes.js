@@ -32,7 +32,7 @@ router.get("/:id", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { fecha, canal, valor_domicilio, notas, clientes_id, items, credito, abono_inicial } = req.body;
+    const { fecha, canal, valor_domicilio, notas, clientes_id, items, credito, abono_inicial, saldo_usado } = req.body;
     if (!fecha || !Array.isArray(items) || !items.length) return badRequest(res, "fecha e items son requeridos.");
     if (credito && !clientes_id) return badRequest(res, "Para ventas a crédito debes asignar un cliente.");
 
@@ -45,6 +45,7 @@ router.post("/", async (req, res, next) => {
       items,
       credito,
       abono_inicial,
+      saldo_usado,
     });
     return created(res, venta);
   } catch (err) {
