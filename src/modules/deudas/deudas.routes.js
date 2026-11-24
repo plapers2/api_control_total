@@ -30,14 +30,13 @@ router.get("/resumen", async (req, res, next) => {
 // POST /deudas/:ventaId/pagos
 router.post("/:ventaId/pagos", async (req, res, next) => {
   try {
-    const { monto, nota, fecha, guardar_excedente } = req.body;
+    const { monto, nota, fecha } = req.body;
     if (!monto || !fecha) return badRequest(res, "monto y fecha son requeridos.");
 
     const pago = await svc.registrarPago(Number(req.params.ventaId), req.empresas_id, req.usuario.id, {
       monto: Number(monto),
       nota,
       fecha,
-      guardar_excedente: !!guardar_excedente,
     });
     return created(res, pago, "Abono registrado.");
   } catch (err) {
@@ -83,6 +82,7 @@ router.post("/clientes/:clientesId/pagos", async (req, res, next) => {
       monto: Number(monto),
       nota,
       fecha,
+      guardar_excedente: !!guardar_excedente,
     });
     return created(res, resultado, "Abono registrado.");
   } catch (err) {

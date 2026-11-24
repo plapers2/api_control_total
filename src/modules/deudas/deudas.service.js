@@ -185,7 +185,7 @@ const detalleCliente = async (clientesId, empresasId) => {
 };
 
 // Abono general: se reparte desde la deuda más vieja hasta la más reciente
-const registrarPagoCliente = async (clientesId, empresasId, usuariosId, guardar_excedente, { monto, nota, fecha }) => {
+const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto, nota, fecha, guardar_excedente }) => {
   if (!Number.isFinite(monto) || monto <= 0) throw badRequest("El monto del abono debe ser mayor a 0.");
 
   return prisma.$transaction(async (tx) => {

@@ -130,7 +130,17 @@ const obtener = async (id, empresasId) =>
 const crear = async (
   empresasId,
   usuariosId,
-  { fecha, canal, valor_domicilio, notas, clientes_id: clienteEntrada, items: itemsEntrada, credito: creditoEntrada, abono_inicial },
+  {
+    fecha,
+    canal,
+    valor_domicilio,
+    notas,
+    clientes_id: clienteEntrada,
+    items: itemsEntrada,
+    credito: creditoEntrada,
+    abono_inicial,
+    saldo_usado,
+  },
 ) => {
   const esConsumo = canal === CONSUMO;
   const items = itemsSegunCanal(canal, itemsEntrada);
