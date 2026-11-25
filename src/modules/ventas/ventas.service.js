@@ -435,20 +435,62 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
     const domicilio = resolverDomicilio(canalFinal, valor_domicilio ?? venta.valor_domicilio);
     const nuevoTotal = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
 
-    // ¿Cuánto se ha cobrado ya?
-    // - Venta de contado (o a crédito pagada al crear): no tiene filas en pagos_venta,
-    //   su único movimiento de caja es el total de la venta.
-    // - Venta a crédito con abonos: cada movimiento de caja es un abono y NO debe tocarse.
-    const hayPagos = venta.pagos_venta.length > 0;
-    const esContado = !hayPagos && venta.estado_pago === "pagada";
-    const pagado = venta.pagos_venta.reduce((s, p) => s + Number(p.monto), 0);
+    // Obtener cuánto dinero se ha recibido realmente.
+    // Si existen pagos_venta, son la fuente de verdad porque incluyen
+    // tanto efectivo como saldo a favor utilizado.
+    let pagado = venta.pagos_venta.reduce((s, p) => s + Number(p.monto), 0);
 
-    let nuevoEstado = venta.estado_pago;
-    if (!esContado) {
-      if (centavos(pagado) > centavos(nuevoTotal)) {
-        throw badRequest(`El nuevo total (${nuevoTotal}) es menor a lo ya abonado (${pagado}). Ajusta los productos o anula la venta.`);
+    // Compatibilidad con ventas históricas que fueron pagadas al registrarse
+    // y no generaron filas en pagos_venta.
+    let pagosDesdeCaja = [];
+
+    if (venta.pagos_venta.length === 0) {
+      const movimientosCaja = await tx.movimientos_caja.findMany({
+        where: {
+          empresas_id: empresasId,
+          ventas_id: id,
+          tipo: "ingreso",
+          categoria: "venta",
+          anulado: false,
+        },
+        orderBy: [{ fecha: "asc" }, { id: "asc" }],
+      });
+
+      pagosDesdeCaja = movimientosCaja.filter((mov) => centavos(mov.monto) > 0);
+
+      pagado = pagosDesdeCaja.reduce((s, mov) => s + Number(mov.monto), 0);
+
+      // Una venta marcada como pagada debe tener un registro que
+      // permita comprobar el ingreso, salvo que su total sea cero.
+      if (venta.estado_pago !== "pendiente" && centavos(venta.total) > 0 && centavos(pagado) === 0) {
+        throw badRequest(
+          "No se encontró un ingreso de Caja ni un pago registrado para esta venta. Verifica su historial antes de editarla.",
+        );
       }
-      nuevoEstado = centavos(pagado) >= centavos(nuevoTotal) ? "pagada" : pagado > 0 ? "parcial" : "pendiente";
+    }
+
+    // Nunca reducir el total por debajo del dinero que ya recibió la empresa.
+    // Una devolución debe registrarse mediante un movimiento explícito.
+    if (centavos(pagado) > centavos(nuevoTotal)) {
+      throw badRequest(
+        `El nuevo total (${nuevoTotal}) es menor a lo ya recibido (${pagado}). Registra primero la devolución correspondiente o anula la venta.`,
+      );
+    }
+
+    const nuevoEstado = centavos(pagado) >= centavos(nuevoTotal) ? "pagada" : pagado > 0 ? "parcial" : "pendiente";
+
+    // Normalizar pagos históricos: conservar cada ingreso original de Caja
+    // como un pago de la venta, sin generar nuevos movimientos de dinero.
+    for (const movimiento of pagosDesdeCaja) {
+      await tx.pagos_venta.create({
+        data: {
+          ventas_id: id,
+          usuarios_id: movimiento.usuarios_id ?? usuariosId,
+          monto: movimiento.monto,
+          fecha: movimiento.fecha,
+          nota: "Pago histórico de Caja",
+        },
+      });
     }
 
     // Revertir stock de items anteriores
@@ -497,29 +539,10 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
     // Red de seguridad (editar): el stock final de los productos no puede quedar en negativo
     await asegurarStockNoNegativo(tx, { productos: items.map((i) => i.productos_id) });
 
-    // Solo las ventas de contado tienen un movimiento de caja igual al total
-    if (esContado) {
-      const movCaja = await tx.movimientos_caja.findFirst({
-        where: { ventas_id: id, anulado: false },
-      });
-      if (movCaja) {
-        await tx.movimientos_caja.update({
-          where: { id: movCaja.id },
-          data: { monto: nuevoTotal, descripcion: `Venta #${id} (editada)` },
-        });
-      }
-    }
-
     const actualizado = await tx.ventas.update({
       where: { id },
       data: { canal: canalFinal, valor_domicilio: domicilio, notas, total: nuevoTotal, estado_pago: nuevoEstado },
     });
-    if (esContado) {
-      await tx.fondo_reposicion_movimientos.updateMany({
-        where: { venta_id: id, tipo: "recuperacion", origen: "venta_inicial", anulado: false },
-        data: { monto_cobrado: nuevoTotal },
-      });
-    }
     await recalcularRecuperacionesVenta(tx, id);
     return actualizado;
   });
