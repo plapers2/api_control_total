@@ -9,7 +9,13 @@ import {
   validarPeriodoControlado,
   validarReciboUnico,
 } from "../servicios-publicos/servicios-publicos.service.js";
-import { registrarUsoCompra, actualizarUsoCompra, anularUsoCompra } from "../fondo-reposicion/fondo.service.js";
+import {
+  registrarUsoCompra,
+  actualizarUsoCompra,
+  anularUsoCompra,
+  resumenFondo,
+  recalcularFondo,
+} from "../fondo-reposicion/fondo.service.js";
 
 // Los movimientos que nacen de una venta o de un abono (ventas_id) se corrigen
 // desde Ventas o Deudas. Editarlos o anularlos aquí descuadra la caja frente a
@@ -79,6 +85,42 @@ const sumarIngresosYGastos = async (where) => {
 const balanceActual = async (empresasId) => {
   const where = { empresas_id: empresasId, anulado: false };
   return sumarIngresosYGastos(where);
+};
+
+const resumenDisponible = async (empresasId) => {
+  const [caja, saldos, fondo] = await Promise.all([
+    balanceActual(empresasId),
+
+    prisma.clientes.aggregate({
+      where: { empresas_id: empresasId },
+      _sum: { saldo_favor: true },
+    }),
+
+    resumenFondo(empresasId),
+  ]);
+
+  const redondear = (valor) => Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
+
+  const balanceCaja = redondear(caja.balance);
+  const saldoClientes = redondear(saldos._sum.saldo_favor ?? 0);
+
+  // Una reserva negativa nunca puede aumentar el dinero disponible.
+  const reservaFondo = redondear(Math.max(Number(fondo.balance), 0));
+
+  const disponible = redondear(balanceCaja - saldoClientes - reservaFondo);
+
+  const historicoConfiable = fondo.estado_historico === "historico_calculado";
+
+  return {
+    disponible,
+    balance_caja: balanceCaja,
+    saldos_favor_clientes: saldoClientes,
+    reserva_fondo: reservaFondo,
+    balance_fondo: redondear(fondo.balance),
+    estado_historico_fondo: fondo.estado_historico,
+    historico_confiable: historicoConfiable,
+    requiere_revision: !historicoConfiable,
+  };
 };
 
 const resumen = async (empresasId, { periodo, desde, hasta } = {}) => {
@@ -282,6 +324,253 @@ const crearDetalleCompra = async (tx, mov, usuariosId, items, fecha) => {
   });
 
   return compra;
+};
+
+const recuperarCompraHistorica = async (id, empresasId) => {
+  return prisma.$transaction(async (tx) => {
+    const conflicto = (mensaje) => Object.assign(new Error(mensaje), { status: 409 });
+
+    const redondearMoneda = (valor) => Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
+
+    const redondearPrecision = (valor, decimales = 4) => {
+      const factor = 10 ** decimales;
+      return Math.round((Number(valor) + Number.EPSILON) * factor) / factor;
+    };
+
+    // Comprobar que la operación original de Caja existe y sigue activa.
+    const mov = await tx.movimientos_caja.findFirst({
+      where: {
+        id,
+        empresas_id: empresasId,
+        tipo: "gasto",
+        categoria: "insumo",
+        anulado: false,
+      },
+      include: {
+        compra_insumos: true,
+      },
+    });
+
+    if (!mov) {
+      throw noEncontrado("Compra histórica de Caja no encontrada.");
+    }
+
+    // Debe existir exactamente un evento activo del fondo para esta compra.
+    const eventos = await tx.fondo_reposicion_movimientos.findMany({
+      where: {
+        empresas_id: empresasId,
+        movimiento_caja_id: id,
+        tipo: "compra",
+        anulado: false,
+      },
+    });
+
+    if (eventos.length !== 1) {
+      throw conflicto("No existe un único evento activo del fondo asociado a esta compra.");
+    }
+
+    const evento = eventos[0];
+
+    // Permitir repetir la operación sin generar duplicados.
+    if (mov.compra_insumos) {
+      if (evento.compra_insumos_id === mov.compra_insumos.id && evento.estado_calculo === "historico_calculado") {
+        return {
+          compra_id: mov.compra_insumos.id,
+          movimiento_caja_id: id,
+          ya_recuperada: true,
+        };
+      }
+
+      throw conflicto("La compra ya tiene una estructura registrada, pero necesita revisión de sus relaciones.");
+    }
+
+    if (evento.estado_calculo !== "incompleto" || evento.compra_insumos_id != null) {
+      throw conflicto("El evento del fondo no está en condiciones de recuperarse automáticamente.");
+    }
+
+    // Los movimientos originales deben haberse generado junto con Caja.
+    const instanteCaja = new Date(mov.created_at).getTime();
+
+    const desde = new Date(instanteCaja - 2000);
+    const hasta = new Date(instanteCaja + 2000);
+
+    const notaEsperada = `Compra registrada en caja #${id}`;
+
+    const entradas = await tx.movimientos_insumos.findMany({
+      where: {
+        tipo: "entrada",
+        anulado: false,
+        lotes_produccion_id: null,
+        nota: notaEsperada,
+        created_at: {
+          gte: desde,
+          lte: hasta,
+        },
+      },
+      orderBy: [{ created_at: "asc" }, { id: "asc" }],
+    });
+
+    if (!entradas.length) {
+      throw conflicto("No se encontraron entradas de inventario que permitan verificar esta compra.");
+    }
+
+    // No reutilizar movimientos que ya pertenecen a otra compra.
+    if (entradas.some((entrada) => entrada.compra_item_id != null)) {
+      throw conflicto("Una o más entradas de inventario ya están vinculadas a otra compra.");
+    }
+
+    let totalCompra = 0;
+
+    for (const entrada of entradas) {
+      const cantidad = Number(entrada.cantidad);
+      const costoTotalOriginal = Number(entrada.costo_total);
+
+      if (
+        !Number.isFinite(cantidad) ||
+        cantidad <= 0 ||
+        entrada.costo_total == null ||
+        !Number.isFinite(costoTotalOriginal) ||
+        costoTotalOriginal <= 0
+      ) {
+        throw conflicto(`La entrada de inventario #${entrada.id} no tiene cantidad y costo verificables.`);
+      }
+
+      // La tabla de detalles conserva el costo total con dos decimales.
+      const costoRedondeado = redondearMoneda(costoTotalOriginal);
+
+      if (Math.abs(costoTotalOriginal - costoRedondeado) > 0.00001) {
+        throw conflicto(`El costo de la entrada #${entrada.id} no puede trasladarse exactamente al detalle de compra.`);
+      }
+
+      totalCompra += costoRedondeado;
+    }
+
+    totalCompra = redondearMoneda(totalCompra);
+
+    if (Math.round(totalCompra * 100) !== Math.round(Number(mov.monto) * 100)) {
+      throw conflicto(
+        `Las entradas de inventario suman $${totalCompra}, pero el movimiento de Caja registra $${Number(mov.monto)}. No coinciden.`,
+      );
+    }
+
+    // Verificar que todos los insumos pertenecen a la empresa.
+    const insumosIds = [...new Set(entradas.map((e) => e.insumos_id))];
+
+    const insumos = await tx.insumos.findMany({
+      where: {
+        id: { in: insumosIds },
+        empresas_id: empresasId,
+      },
+      select: { id: true },
+    });
+
+    if (insumos.length !== insumosIds.length) {
+      throw conflicto("Una o más entradas corresponden a insumos que no pertenecen a esta empresa.");
+    }
+
+    // Crear únicamente la estructura contable de la compra.
+    const compra = await tx.compras_insumos.create({
+      data: {
+        empresas_id: empresasId,
+        movimientos_caja_id: mov.id,
+        fecha: mov.fecha,
+        monto_total: mov.monto,
+      },
+    });
+
+    let detallesVinculados = 0;
+
+    for (const entrada of entradas) {
+      const cantidad = Number(entrada.cantidad);
+      const costoTotal = redondearMoneda(entrada.costo_total);
+      const costoUnitario = redondearPrecision(Number(entrada.costo_total) / cantidad, 4);
+
+      const detalle = await tx.compras_insumos_items.create({
+        data: {
+          compra_id: compra.id,
+          insumos_id: entrada.insumos_id,
+          cantidad,
+          costo_unitario: costoUnitario,
+          costo_total: costoTotal,
+        },
+      });
+
+      // Vincular la entrada existente. No crear otra entrada ni modificar stock.
+      await tx.movimientos_insumos.update({
+        where: { id: entrada.id },
+        data: {
+          compra_item_id: detalle.id,
+        },
+      });
+
+      detallesVinculados += 1;
+    }
+
+    // Asociar la estructura recuperada con el evento histórico existente.
+    await tx.fondo_reposicion_movimientos.update({
+      where: { id: evento.id },
+      data: {
+        compra_insumos_id: compra.id,
+        estado_calculo: "historico_calculado",
+      },
+    });
+
+    // Redistribuir el fondo según la cronología original.
+    // Esto actualizará monto_fondo y monto_externo de la compra.
+    const balance = await recalcularFondo(tx, empresasId);
+
+    // Actualizar el contador de compras incompletas sin reconstruir el historial.
+    const comprasSinDetalle = await tx.fondo_reposicion_movimientos.count({
+      where: {
+        empresas_id: empresasId,
+        tipo: "compra",
+        anulado: false,
+        estado_calculo: "incompleto",
+      },
+    });
+
+    const eventosSinCosto = await tx.fondo_reposicion_movimientos.count({
+      where: {
+        empresas_id: empresasId,
+        anulado: false,
+        estado_calculo: "sin_costo_verificable",
+      },
+    });
+
+    const config = await tx.fondo_reposicion_config.findUnique({
+      where: { empresas_id: empresasId },
+    });
+
+    const ventasIncompletas = Number(config?.ventas_incompletas ?? 0);
+
+    const estadoHistorico =
+      ventasIncompletas > 0 || comprasSinDetalle > 0 ? "incompleto" : eventosSinCosto > 0 ? "sin_costo_verificable" : "historico_calculado";
+
+    await tx.fondo_reposicion_config.upsert({
+      where: { empresas_id: empresasId },
+      create: {
+        empresas_id: empresasId,
+        estado_historico: estadoHistorico,
+        ventas_incompletas: ventasIncompletas,
+        compras_sin_detalle: comprasSinDetalle,
+      },
+      update: {
+        estado_historico: estadoHistorico,
+        compras_sin_detalle: comprasSinDetalle,
+      },
+    });
+
+    return {
+      compra_id: compra.id,
+      movimiento_caja_id: mov.id,
+      detalles_vinculados: detallesVinculados,
+      entradas_inventario_reutilizadas: detallesVinculados,
+      balance_fondo: balance,
+      compras_sin_detalle: comprasSinDetalle,
+      estado_historico: estadoHistorico,
+      ya_recuperada: false,
+    };
+  });
 };
 
 const registrar = async (
@@ -549,4 +838,4 @@ const anular = async (id, empresasId, motivo) => {
   });
 };
 
-export { listar, resumen, registrar, actualizar, anular, balanceActual };
+export { listar, resumen, registrar, actualizar, anular, balanceActual, resumenDisponible, recuperarCompraHistorica };

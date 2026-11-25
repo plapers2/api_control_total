@@ -10,7 +10,6 @@ const router = Router();
 
 router.use(authenticate, requireEmpresa);
 
-
 // Fondo de reposición: apartado informativo, independiente del balance de Caja.
 router.get("/fondo-resumen", async (req, res, next) => {
   try {
@@ -24,6 +23,22 @@ router.get("/fondo-resumen", async (req, res, next) => {
 router.post("/fondo-reconstruir", requireRol("admin"), async (req, res, next) => {
   try {
     return ok(res, await reconstruirHistorico(req.empresas_id), "Histórico del fondo reconstruido.");
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/compras-historicas/:id/recuperar", requireRol("admin"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return badRequest(res, "ID de movimiento inválido.");
+    }
+
+    const resultado = await svc.recuperarCompraHistorica(id, req.empresas_id);
+
+    return ok(res, resultado, resultado.ya_recuperada ? "La compra ya estaba recuperada." : "Compra histórica recuperada correctamente.");
   } catch (err) {
     next(err);
   }
@@ -51,6 +66,15 @@ router.get("/resumen", async (req, res, next) => {
   try {
     const { periodo, desde, hasta } = req.query;
     return ok(res, await svc.resumen(req.empresas_id, { periodo, desde, hasta }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Dinero realmente disponible después de reconocer reservas y saldos de clientes.
+router.get("/disponible-resumen", async (req, res, next) => {
+  try {
+    return ok(res, await svc.resumenDisponible(req.empresas_id));
   } catch (err) {
     next(err);
   }
@@ -98,7 +122,18 @@ router.put("/:id", requireRol("admin"), async (req, res, next) => {
     if (categoria === "servicio_publico" && !["energia", "agua", "gas"].includes(tipo_servicio)) {
       return badRequest(res, "tipo_servicio (energia, agua o gas) es requerido cuando la categoría es servicio_publico.");
     }
-    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, { tipo, categoria, monto, descripcion, fecha, tipo_servicio, periodo_servicio, insumos: Array.isArray(insumos) ? insumos.map((i) => ({ insumos_id: Number(i.insumos_id), cantidad: Number(i.cantidad), costo_unitario: Number(i.costo_unitario) })) : undefined });
+    const mov = await svc.actualizar(Number(req.params.id), req.empresas_id, {
+      tipo,
+      categoria,
+      monto,
+      descripcion,
+      fecha,
+      tipo_servicio,
+      periodo_servicio,
+      insumos: Array.isArray(insumos)
+        ? insumos.map((i) => ({ insumos_id: Number(i.insumos_id), cantidad: Number(i.cantidad), costo_unitario: Number(i.costo_unitario) }))
+        : undefined,
+    });
     return ok(res, mov);
   } catch (err) {
     next(err);

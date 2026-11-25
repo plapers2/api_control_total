@@ -40,20 +40,138 @@ const resolverSaldoUsado = (saldoUsado, clientesId, total) => {
   return n;
 };
 
-const resolverCostoPromedioProducto = async (tx, producto) => {
-  if (producto.costo_promedio != null && Number(producto.costo_promedio) > 0) return { costo: Number(producto.costo_promedio), estado: producto.costo_promedio_estado || "historico_calculado" };
-  const lotes = await tx.lotes_produccion_items.findMany({
-    where: { productos_id: producto.id, lotes_produccion: { empresas_id: producto.empresas_id, anulado: false } },
-    select: { cantidad: true, costo_unitario: true },
+const obtenerDiaISO = (valor) => {
+  const fecha = valor instanceof Date ? valor : new Date(valor);
+
+  if (!Number.isFinite(fecha.getTime())) return null;
+
+  return fecha.toISOString().slice(0, 10);
+};
+
+const resolverCostoPromedioProducto = async (tx, producto, fechaVenta, creadoVenta) => {
+  const diaVenta = obtenerDiaISO(fechaVenta);
+  const instanteVenta = new Date(creadoVenta).getTime();
+
+  if (!diaVenta || !Number.isFinite(instanteVenta)) {
+    return { costo: null, estado: "incompleto" };
+  }
+
+  const itemsLotes = await tx.lotes_produccion_items.findMany({
+    where: {
+      productos_id: producto.id,
+      lotes_produccion: {
+        empresas_id: producto.empresas_id,
+        anulado: false,
+      },
+    },
+    select: {
+      cantidad: true,
+      costo_unitario: true,
+      lotes_produccion: {
+        select: {
+          id: true,
+          fecha: true,
+          created_at: true,
+          movimientos_insumos: {
+            where: {
+              tipo: "salida",
+              anulado: false,
+            },
+            select: {
+              costo_total: true,
+            },
+          },
+        },
+      },
+    },
   });
-  const unidades = lotes.reduce((s, i) => s + Number(i.cantidad), 0);
-  if (unidades <= 0) return { costo: null, estado: "sin_costo_verificable" };
-  if (lotes.some((i) => Number(i.costo_unitario) <= 0)) return { costo: null, estado: "incompleto" };
-  const valor = lotes.reduce((s, i) => s + Number(i.cantidad) * Number(i.costo_unitario), 0);
-  if (valor <= 0) return { costo: null, estado: "sin_costo_verificable" };
-  const costo = valor / unidades;
-  await tx.productos.update({ where: { id: producto.id }, data: { costo_promedio: costo, costo_promedio_estado: "historico_calculado" } });
-  return { costo, estado: "historico_calculado" };
+
+  const lotes = itemsLotes
+    .map((item) => {
+      const lote = item.lotes_produccion;
+      const cantidad = Number(item.cantidad);
+      const costoRegistrado = Number(item.costo_unitario ?? 0);
+
+      let costoUnitario = null;
+
+      // Conservar el costo histórico positivo ya registrado.
+      if (Number.isFinite(costoRegistrado) && costoRegistrado > 0) {
+        costoUnitario = costoRegistrado;
+      } else {
+        const movimientos = lote.movimientos_insumos ?? [];
+
+        // Recuperar el costo desde todos los consumos activos del lote.
+        const consumosCompletos =
+          movimientos.length > 0 &&
+          movimientos.every((mov) => mov.costo_total != null && Number.isFinite(Number(mov.costo_total)) && Number(mov.costo_total) >= 0);
+
+        if (consumosCompletos && Number.isFinite(cantidad) && cantidad > 0) {
+          const costoTotal = movimientos.reduce((total, mov) => total + Number(mov.costo_total), 0);
+
+          if (costoTotal > 0) {
+            costoUnitario = costoTotal / cantidad;
+          }
+        }
+      }
+
+      return {
+        id: lote.id,
+        fecha: obtenerDiaISO(lote.fecha),
+        createdAt: new Date(lote.created_at).getTime(),
+        cantidad,
+        costoUnitario,
+      };
+    })
+    .filter((lote) => {
+      if (!lote.fecha) return false;
+
+      // No incluir producciones posteriores a la venta.
+      if (lote.fecha < diaVenta) return true;
+      if (lote.fecha > diaVenta) return false;
+
+      // Si son del mismo día, respetar el orden real de creación.
+      return Number.isFinite(lote.createdAt) && lote.createdAt <= instanteVenta;
+    })
+    .sort((a, b) => a.fecha.localeCompare(b.fecha) || a.createdAt - b.createdAt || a.id - b.id);
+
+  if (lotes.length === 0) {
+    return { costo: null, estado: "sin_costo_verificable" };
+  }
+
+  let unidades = 0;
+  let valorTotal = 0;
+  let lotesSinCosto = 0;
+
+  for (const lote of lotes) {
+    if (!Number.isFinite(lote.cantidad) || lote.cantidad <= 0) {
+      lotesSinCosto += 1;
+      continue;
+    }
+
+    unidades += lote.cantidad;
+
+    if (lote.costoUnitario == null || !Number.isFinite(lote.costoUnitario) || lote.costoUnitario <= 0) {
+      lotesSinCosto += 1;
+      continue;
+    }
+
+    valorTotal += lote.cantidad * lote.costoUnitario;
+  }
+
+  if (lotesSinCosto > 0) {
+    return { costo: null, estado: "incompleto" };
+  }
+
+  if (unidades <= 0 || valorTotal <= 0) {
+    return { costo: null, estado: "sin_costo_verificable" };
+  }
+
+  const costo = Math.round((valorTotal / unidades + Number.EPSILON) * 10000) / 10000;
+
+  return {
+    costo,
+    estado: "historico_calculado",
+  };
 };
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, page = 1, limit = 10, q } = {}) => {
@@ -170,6 +288,9 @@ const crear = async (
     const domicilio = resolverDomicilio(canalFinal, valor_domicilio);
     await validarCliente(tx, empresasId, clientes_id);
 
+    const fechaVenta = fechaColombiaToUTC(fecha);
+    const creadoVenta = new Date();
+
     const costosPorProducto = new Map();
     for (const item of items) {
       const producto = await tx.productos.findFirst({
@@ -178,7 +299,8 @@ const crear = async (
       if (!producto) throw badRequest(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad)
         throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
-      if (!costosPorProducto.has(item.productos_id)) costosPorProducto.set(item.productos_id, await resolverCostoPromedioProducto(tx, producto));
+      if (!costosPorProducto.has(item.productos_id))
+        costosPorProducto.set(item.productos_id, await resolverCostoPromedioProducto(tx, producto, fechaVenta, creadoVenta));
     }
 
     const total = items.reduce((sum, i) => sum + Number(i.precio_unitario) * i.cantidad, 0) + domicilio;
@@ -196,7 +318,7 @@ const crear = async (
         clientes_id: clientes_id ?? null,
         canal: canalFinal,
         valor_domicilio: domicilio,
-        fecha: fechaColombiaToUTC(fecha),
+        fecha: fechaVenta,
         notas,
         total,
         estado_pago: estadoPago,
@@ -284,7 +406,13 @@ const crear = async (
     }
 
     if (pagadoTotal > 0) {
-      await registrarRecuperacionVenta(tx, { empresasId, ventaId: venta.id, montoCobrado: pagadoTotal, fecha: fechaColombiaToUTC(fecha), origen: "venta_inicial" });
+      await registrarRecuperacionVenta(tx, {
+        empresasId,
+        ventaId: venta.id,
+        montoCobrado: pagadoTotal,
+        fecha: fechaColombiaToUTC(fecha),
+        origen: "venta_inicial",
+      });
     }
     return venta;
   });
@@ -340,7 +468,8 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
       if (!producto) throw badRequest(`Producto ${item.productos_id} no encontrado.`);
       if (Number(producto.stock_actual) < item.cantidad)
         throw badRequest(`Stock insuficiente para "${producto.nombre}". Disponible: ${producto.stock_actual}.`);
-      if (!costosPorProducto.has(item.productos_id)) costosPorProducto.set(item.productos_id, await resolverCostoPromedioProducto(tx, producto));
+      if (!costosPorProducto.has(item.productos_id))
+        costosPorProducto.set(item.productos_id, await resolverCostoPromedioProducto(tx, producto, venta.fecha, venta.created_at));
     }
 
     // Reemplazar items
@@ -396,6 +525,79 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
   });
 };
 
+const recalcularCostoHistoricoVenta = async (id, empresasId) => {
+  return prisma.$transaction(async (tx) => {
+    const venta = await tx.ventas.findFirst({
+      where: {
+        id,
+        empresas_id: empresasId,
+        anulada: false,
+      },
+      include: {
+        ventas_items: true,
+      },
+    });
+
+    if (!venta) {
+      throw noEncontrado("Venta no encontrada o anulada.");
+    }
+
+    if (!venta.ventas_items.length) {
+      throw badRequest("La venta no tiene productos para recalcular.");
+    }
+
+    const costosPorProducto = new Map();
+
+    for (const item of venta.ventas_items) {
+      // Nunca sobrescribir un costo positivo ya registrado.
+      if (item.costo_unitario != null && Number(item.costo_unitario) > 0) {
+        continue;
+      }
+
+      let resultado = costosPorProducto.get(item.productos_id);
+
+      if (!resultado) {
+        const producto = await tx.productos.findFirst({
+          where: {
+            id: item.productos_id,
+            empresas_id: empresasId,
+          },
+        });
+
+        if (!producto) {
+          throw badRequest(`No se encontró el producto ${item.productos_id} de la venta.`);
+        }
+
+        resultado = await resolverCostoPromedioProducto(tx, producto, venta.fecha, venta.created_at);
+
+        costosPorProducto.set(item.productos_id, resultado);
+      }
+
+      await tx.ventas_items.update({
+        where: { id: item.id },
+        data: {
+          costo_unitario: resultado.costo,
+          estado_costo: resultado.estado,
+        },
+      });
+    }
+
+    // Actualizar las recuperaciones existentes sin crear movimientos
+    // nuevos ni modificar pagos o movimientos de Caja.
+    await recalcularRecuperacionesVenta(tx, id);
+
+    return tx.ventas.findFirst({
+      where: {
+        id,
+        empresas_id: empresasId,
+      },
+      include: {
+        ventas_items: true,
+      },
+    });
+  });
+};
+
 const anular = async (id, empresasId, usuariosId, motivo) => {
   return prisma.$transaction(async (tx) => {
     const venta = await tx.ventas.findFirst({
@@ -444,4 +646,4 @@ const anular = async (id, empresasId, usuariosId, motivo) => {
   });
 };
 
-export { listar, obtener, crear, actualizar, anular };
+export { listar, obtener, crear, actualizar, recalcularCostoHistoricoVenta, anular };

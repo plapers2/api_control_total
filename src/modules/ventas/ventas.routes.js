@@ -53,6 +53,22 @@ router.post("/", async (req, res, next) => {
   }
 });
 
+router.post("/:id/recalcular-costo-historico", requireRol("admin"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return badRequest(res, "ID de venta inválido.");
+    }
+
+    const venta = await svc.recalcularCostoHistoricoVenta(id, req.empresas_id);
+
+    return ok(res, venta, "Costo histórico recalculado.");
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.put("/:id", requireRol("admin"), async (req, res, next) => {
   try {
     const { canal, valor_domicilio, notas, items } = req.body;
