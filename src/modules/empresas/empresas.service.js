@@ -52,22 +52,52 @@ const listarMiembros = async (empresasId) => {
 
 // ── POST /empresas/:id/miembros ──────────────────────────────────────
 // upsert = "actualiza si existe, crea si no" (equivalente a findOrCreate + update)
-const agregarMiembro = async (empresasId, { usuarios_id, roles_id }, usuarioActualId) => {
-  const rol = await prisma.roles.findUnique({ where: { id: Number(roles_id) } });
-  if (!rol) throw Object.assign(new Error("El rol indicado no existe."), { status: 400 });
 
-  // El admin que llama no puede quitarse su propio rol: así la empresa nunca
-  // se queda sin administrador.
-  if (Number(usuarios_id) === usuarioActualId && rol.nombre !== "admin") {
+const agregarMiembro = async (empresasId, { usuarios_id, roles_id }, usuarioActualId) => {
+  const usuarioId = Number(usuarios_id);
+  const rolId = Number(roles_id);
+
+  if (!Number.isInteger(usuarioId) || usuarioId <= 0) {
+    throw Object.assign(new Error("El usuario indicado no es válido."), { status: 400 });
+  }
+
+  if (!Number.isInteger(rolId) || rolId <= 0) {
+    throw Object.assign(new Error("El rol indicado no es válido."), { status: 400 });
+  }
+
+  const [usuario, rol] = await Promise.all([
+    prisma.usuarios.findUnique({
+      where: { id: usuarioId },
+      select: { id: true, activo: true },
+    }),
+    prisma.roles.findUnique({
+      where: { id: rolId },
+      select: { id: true, nombre: true },
+    }),
+  ]);
+
+  if (!usuario || !usuario.activo) {
+    throw Object.assign(new Error("El usuario no existe o está inactivo."), { status: 400 });
+  }
+
+  if (!rol || !["admin", "empleado"].includes(rol.nombre)) {
+    throw Object.assign(new Error("El rol indicado no es válido."), { status: 400 });
+  }
+
+  // El administrador no puede quitarse su propio rol de administrador.
+  if (usuarioId === usuarioActualId && rol.nombre !== "admin") {
     throw Object.assign(new Error("No puedes quitarte tu propio rol de administrador."), { status: 400 });
   }
 
   return prisma.usuarios_empresas.upsert({
     where: {
-      usuarios_id_empresas_id: { usuarios_id: Number(usuarios_id), empresas_id: empresasId },
+      usuarios_id_empresas_id: {
+        usuarios_id: usuarioId,
+        empresas_id: empresasId,
+      },
     },
     create: {
-      usuarios_id: Number(usuarios_id),
+      usuarios_id: usuarioId,
       empresas_id: empresasId,
       roles_id: rol.id,
       activo: true,
