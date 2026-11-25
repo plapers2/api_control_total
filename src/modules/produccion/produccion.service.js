@@ -6,34 +6,168 @@ import { asegurarStockNoNegativo, validarCantidadesEnteras } from "../../utils/s
 import { noEncontrado } from "../../utils/errors.js";
 import { asegurarBaseInsumo, recalcularInsumo } from "../../utils/inventarioInsumos.js";
 
+const errorServicio = (mensaje, status = 400) => Object.assign(new Error(mensaje), { status });
+
+const redondear = (valor, decimales = 4) => {
+  const factor = 10 ** decimales;
+  return Math.round((Number(valor) + Number.EPSILON) * factor) / factor;
+};
+
+const validarItemsLote = (items) => {
+  if (!Array.isArray(items) || items.length !== 1) {
+    throw errorServicio("Cada lote de producción debe contener exactamente un producto.");
+  }
+
+  const item = items[0];
+
+  if (!item || !Number.isInteger(Number(item.productos_id)) || Number(item.productos_id) <= 0) {
+    throw errorServicio("El producto del lote no es válido.");
+  }
+
+  validarCantidadesEnteras(items);
+
+  return item;
+};
+
+const validarCostoManual = (item) => {
+  const costo = Number(item.costo_total ?? 0);
+
+  if (!Number.isFinite(costo) || costo < 0) {
+    throw errorServicio("El costo total ingresado para el producto no es válido.");
+  }
+
+  return redondear(costo, 2);
+};
+
+// Se permiten cantidades de cero porque un ingrediente puede no haberse utilizado.
+// Las cantidades negativas siguen estando prohibidas.
+const validarCantidadInsumo = (insumoId, cantidad) => {
+  const id = Number(insumoId);
+  const qty = Number(cantidad);
+
+  if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(qty) || qty < 0) {
+    throw errorServicio("Hay un insumo o una cantidad de consumo inválida.");
+  }
+
+  if (Math.abs(qty * 1000 - Math.round(qty * 1000)) > 0.000001) {
+    throw errorServicio("Las cantidades de insumos admiten máximo tres decimales.");
+  }
+
+  return { id, qty: redondear(qty, 3) };
+};
+
 const recalcularCostoPromedioProducto = async (tx, productosId) => {
   const lotes = await tx.lotes_produccion_items.findMany({
-    where: { productos_id: productosId, lotes_produccion: { anulado: false } },
-    select: { cantidad: true, costo_unitario: true },
+    where: {
+      productos_id: productosId,
+      lotes_produccion: { anulado: false },
+    },
+    select: {
+      cantidad: true,
+      costo_unitario: true,
+    },
   });
 
-  const unidades = lotes.reduce((s, i) => s + Number(i.cantidad), 0);
-  const valor = lotes.reduce((s, i) => s + Number(i.cantidad) * Number(i.costo_unitario), 0);
-  const completo = lotes.length > 0 && lotes.every((i) => Number(i.costo_unitario) > 0);
+  const unidades = lotes.reduce((s, item) => s + Number(item.cantidad), 0);
+
+  const valor = lotes.reduce((s, item) => s + Number(item.cantidad) * Number(item.costo_unitario), 0);
+
+  const completo = lotes.length > 0 && lotes.every((item) => Number(item.costo_unitario) > 0);
 
   const estado = lotes.length === 0 ? "sin_costo_verificable" : completo && valor > 0 ? "historico_calculado" : "incompleto";
 
   return tx.productos.update({
     where: { id: productosId },
     data: {
-      costo_promedio: completo && unidades > 0 && valor > 0 ? valor / unidades : null,
+      costo_promedio: completo && unidades > 0 && valor > 0 ? redondear(valor / unidades, 4) : null,
       costo_promedio_estado: estado,
     },
   });
 };
 
-// Captura una fotografía independiente de los productos y movimientos de una
-// versión. Los valores Decimal se convierten a Number para almacenarlos en JSON.
+const bloquearInsumos = async (tx, insumosIds) => {
+  const ids = [...new Set(insumosIds.map(Number))].filter((id) => Number.isInteger(id) && id > 0).sort((a, b) => a - b);
+
+  for (const id of ids) {
+    await tx.$queryRaw`
+      SELECT id
+      FROM insumos
+      WHERE id = ${id}
+      FOR UPDATE
+    `;
+  }
+
+  return ids;
+};
+
+const validarCostoInsumo = (insumo) => {
+  const costo = Number(insumo?.precio_unidad);
+
+  const baseValorizada =
+    insumo?.stock_base != null && insumo?.valor_base != null && insumo?.fecha_base != null && insumo?.movimiento_base_id != null;
+
+  const estadoVerificable = insumo?.estado_costo === "verificado" || insumo?.estado_costo === "historico_calculado";
+
+  if (!baseValorizada || !estadoVerificable || !Number.isFinite(costo) || costo <= 0) {
+    throw errorServicio(
+      `El insumo "${insumo?.nombre ?? "desconocido"}" no tiene un costo promedio verificable. Registra o concilia su costo antes de producir.`,
+      409,
+    );
+  }
+
+  return costo;
+};
+
+const validarMovimientosFueraBase = async (tx, movimientos) => {
+  for (const movimiento of movimientos) {
+    if (movimiento.anulado) continue;
+
+    const insumo = await tx.insumos.findUnique({
+      where: { id: movimiento.insumos_id },
+      select: {
+        nombre: true,
+        stock_base: true,
+        valor_base: true,
+        fecha_base: true,
+        movimiento_base_id: true,
+      },
+    });
+
+    if (!insumo) {
+      throw errorServicio(`No se encontró el insumo ${movimiento.insumos_id}.`, 409);
+    }
+
+    const camposEstructurales = [insumo.stock_base, insumo.fecha_base, insumo.movimiento_base_id];
+
+    const tieneBaseCompleta = camposEstructurales.every((valor) => valor != null);
+
+    const tieneBaseParcial = camposEstructurales.some((valor) => valor != null) && !tieneBaseCompleta;
+
+    if (tieneBaseParcial || (insumo.stock_base == null && insumo.valor_base != null)) {
+      throw errorServicio(
+        `El insumo "${insumo.nombre}" tiene una base histórica inconsistente. Debe revisarse antes de modificar la producción.`,
+        409,
+      );
+    }
+
+    if (tieneBaseCompleta && movimiento.id <= Number(insumo.movimiento_base_id)) {
+      throw errorServicio(
+        `No se puede modificar esta producción porque el insumo "${insumo.nombre}" tiene movimientos anteriores a su base histórica.`,
+        409,
+      );
+    }
+  }
+};
+
 const obtenerSnapshotsLote = async (tx, loteId, soloMovimientosSinEdicion = false) => {
   const [items, movimientos] = await Promise.all([
     tx.lotes_produccion_items.findMany({
       where: { lotes_produccion_id: loteId },
-      include: { productos: { select: { id: true, nombre: true } } },
+      include: {
+        productos: {
+          select: { id: true, nombre: true },
+        },
+      },
       orderBy: { id: "asc" },
     }),
 
@@ -44,7 +178,11 @@ const obtenerSnapshotsLote = async (tx, loteId, soloMovimientosSinEdicion = fals
       },
       include: {
         insumos: {
-          select: { id: true, nombre: true, unidad_medida: true },
+          select: {
+            id: true,
+            nombre: true,
+            unidad_medida: true,
+          },
         },
       },
       orderBy: [{ created_at: "asc" }, { id: "asc" }],
@@ -97,14 +235,12 @@ const registrarEdicionLote = async (
       tipo_registro: tipoRegistro,
       estado,
       notas,
-      costo_total: costoTotal,
+      costo_total: redondear(costoTotal, 2),
       productos_snapshot: snapshots.productos,
       insumos_snapshot: snapshots.insumos,
     },
   });
 
-  // Solo vincula movimientos que todavía no pertenecen a una versión.
-  // Los movimientos anulados de ediciones anteriores conservan su asociación.
   if (soloMovimientosSinEdicion) {
     await tx.movimientos_insumos.updateMany({
       where: {
@@ -116,6 +252,29 @@ const registrarEdicionLote = async (
   }
 
   return edicion;
+};
+
+const registrarHistorialPrevioSiHaceFalta = async (tx, lote, usuariosId) => {
+  if (lote.ediciones.length > 0) return;
+
+  const edicionPrevia = await registrarEdicionLote(tx, {
+    loteId: lote.id,
+    usuariosId: lote.usuarios_id ?? usuariosId,
+    numeroEdicion: 0,
+    tipoRegistro: "historial_previo",
+    estado: "incompleto",
+    notas: lote.notas,
+    costoTotal: lote.costo_total,
+    soloMovimientosSinEdicion: false,
+  });
+
+  await tx.movimientos_insumos.updateMany({
+    where: {
+      lotes_produccion_id: lote.id,
+      edicion_id: null,
+    },
+    data: { edicion_id: edicionPrevia.id },
+  });
 };
 
 const listar = async (empresasId, { periodo = "dia", desde, hasta, productos_id, page = 1, limit = 10 } = {}) => {
@@ -140,7 +299,9 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, productos_id,
       skip,
       take: Number(limit),
       include: {
-        usuarios: { select: { id: true, nombre: true } },
+        usuarios: {
+          select: { id: true, nombre: true },
+        },
         lotes_produccion_items: {
           include: { productos: true },
         },
@@ -155,196 +316,237 @@ const listar = async (empresasId, { periodo = "dia", desde, hasta, productos_id,
 
 const obtener = async (id, empresasId) =>
   prisma.lotes_produccion.findFirst({
-    where: { id, empresas_id: empresasId },
+    where: {
+      id,
+      empresas_id: empresasId,
+    },
     include: {
-      usuarios: { select: { id: true, nombre: true } },
+      usuarios: {
+        select: { id: true, nombre: true },
+      },
 
       lotes_produccion_items: {
         include: { productos: true },
       },
 
       movimientos_insumos: {
-        include: { insumos: true, edicion: true },
+        include: {
+          insumos: true,
+          edicion: true,
+        },
         orderBy: [{ created_at: "asc" }, { id: "asc" }],
       },
 
       ediciones: {
         include: {
-          usuarios: { select: { id: true, nombre: true } },
+          usuarios: {
+            select: { id: true, nombre: true },
+          },
         },
         orderBy: { numero_edicion: "asc" },
       },
     },
   });
 
-const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_reales }) => {
-  return prisma.$transaction(async (tx) => {
-    validarCantidadesEnteras(items);
+/**
+ * Determina el método de costeo del producto y prepara sus consumos.
+ *
+ * - Producto sin receta: siempre utiliza costo manual.
+ * - Producto con receta y sin insumos_reales: utiliza la receta.
+ * - Producto con receta y con insumos_reales: utiliza las cantidades reales.
+ * - Los consumos reales pueden incluir cantidades cero.
+ * - Se exige al menos un consumo positivo para productos con receta.
+ */
+const prepararConsumos = async (tx, item, insumosReales, insumosRealesEnviados) => {
+  if (insumosRealesEnviados && !Array.isArray(insumosReales)) {
+    throw errorServicio("Los consumos reales de insumos deben enviarse como una lista.");
+  }
 
-    await validarProductos(
-      tx,
-      empresasId,
-      items.map((i) => i.productos_id),
-    );
+  const recetas = await tx.recetas.findMany({
+    where: {
+      productos_id: Number(item.productos_id),
+    },
+  });
 
-    await validarInsumos(
-      tx,
-      empresasId,
-      (insumos_reales ?? []).map((i) => i.insumos_id),
-    );
+  const consumos = new Map();
 
-    let costoTotal = 0;
-    const movimientos = [];
+  // Un producto sin receta siempre se costea manualmente.
+  // No se utilizan insumos_reales para cambiar su método de costeo.
+  if (recetas.length === 0) {
+    return {
+      consumos,
+      recetas,
+      usaCosteoInsumos: false,
+    };
+  }
 
-    if (insumos_reales && Array.isArray(insumos_reales) && insumos_reales.length > 0) {
-      for (const ir of insumos_reales) {
-        const insumo = await tx.insumos.findUnique({
-          where: { id: ir.insumos_id },
-        });
+  const agregarConsumo = (insumoId, cantidad) => {
+    const { id, qty } = validarCantidadInsumo(insumoId, cantidad);
 
-        if (!insumo) continue;
+    // Una cantidad cero es válida, pero no genera movimiento de inventario.
+    if (qty === 0) return;
 
-        if (Number(insumo.stock_actual) < Number(ir.cantidad)) {
-          throw new Error(
-            `Insumo insuficiente: "${insumo.nombre}". Disponible: ${insumo.stock_actual} ${insumo.unidad_medida}, utilizado: ${ir.cantidad}.`,
-          );
-        }
+    consumos.set(id, redondear((consumos.get(id) ?? 0) + qty, 3));
+  };
 
-        if (Number(ir.cantidad) > 0 && !(Number(insumo.precio_unidad) > 0)) {
-          throw new Error(
-            `El insumo "${insumo.nombre}" no tiene un costo promedio verificable. Registra su costo inicial desde Insumos antes de producir.`,
-          );
-        }
+  if (insumosRealesEnviados) {
+    for (const insumo of insumosReales) {
+      agregarConsumo(insumo?.insumos_id, insumo?.cantidad);
+    }
+  } else {
+    for (const receta of recetas) {
+      const cantidadReceta = Number(receta.cantidad);
+
+      if (!Number.isFinite(cantidadReceta) || cantidadReceta <= 0) {
+        throw errorServicio("Una receta contiene una cantidad de insumo inválida.");
       }
 
-      for (const ir of insumos_reales ?? []) {
-        const cantidad = Number(ir.cantidad);
+      agregarConsumo(receta.insumos_id, cantidadReceta * Number(item.cantidad));
+    }
+  }
 
-        if (!Number.isFinite(cantidad) || cantidad <= 0) {
-          throw new Error("Las cantidades de los insumos deben ser mayores que cero.");
-        }
+  if (consumos.size === 0) {
+    throw errorServicio("Debes registrar al menos un insumo con una cantidad mayor a cero para este producto.");
+  }
 
-        const insumo = await tx.insumos.findUnique({
-          where: { id: ir.insumos_id },
-        });
+  return {
+    consumos,
+    recetas,
+    usaCosteoInsumos: true,
+  };
+};
 
-        if (!insumo) continue;
+const obtenerInsumosValorizados = async (tx, empresasId, consumos) => {
+  const insumosIds = [...consumos.keys()];
 
-        const costo = Number(ir.cantidad) * Number(insumo.precio_unidad ?? 0);
+  if (insumosIds.length === 0) {
+    return {
+      insumosIds,
+      insumosMap: new Map(),
+      precios: new Map(),
+    };
+  }
 
-        costoTotal += costo;
+  await validarInsumos(tx, empresasId, insumosIds);
+  await bloquearInsumos(tx, insumosIds);
 
-        movimientos.push({
-          insumos_id: ir.insumos_id,
-          tipo: "salida",
-          cantidad: Number(ir.cantidad),
-          costo_total: costo,
-          nota: `Lote de produccion`,
-          usuarios_id: usuariosId,
-        });
+  const registros = await tx.insumos.findMany({
+    where: {
+      id: { in: insumosIds },
+      empresas_id: empresasId,
+    },
+  });
 
-        await asegurarBaseInsumo(tx, insumo);
+  const iniciales = new Map(registros.map((insumo) => [Number(insumo.id), insumo]));
 
-        await tx.insumos.update({
-          where: { id: ir.insumos_id },
-          data: {
-            stock_actual: {
-              decrement: Number(ir.cantidad),
-            },
-          },
-        });
-      }
-    } else {
-      const insumosTotales = {};
+  if (iniciales.size !== insumosIds.length) {
+    throw errorServicio("Uno o más insumos no existen o no pertenecen a la empresa.", 409);
+  }
 
-      for (const item of items) {
-        const recetas = await tx.recetas.findMany({
-          where: { productos_id: item.productos_id },
-          include: { insumos: true },
-        });
+  for (const insumoId of insumosIds) {
+    const insumo = iniciales.get(insumoId);
 
-        for (const r of recetas) {
-          const cantidadUsada = Number(r.cantidad) * item.cantidad;
-
-          insumosTotales[r.insumos_id] = (insumosTotales[r.insumos_id] || 0) + cantidadUsada;
-        }
-      }
-
-      for (const [insumoId, cantidadNecesaria] of Object.entries(insumosTotales)) {
-        const insumo = await tx.insumos.findUnique({
-          where: { id: Number(insumoId) },
-        });
-
-        if (Number(insumo.stock_actual) < cantidadNecesaria) {
-          throw new Error(
-            `Insumo insuficiente: "${insumo.nombre}". Disponible: ${insumo.stock_actual} ${insumo.unidad_medida}, necesario: ${cantidadNecesaria}.`,
-          );
-        }
-      }
-
-      // Costo exacto por item: como aquí sí sabemos qué receta corresponde a
-      // cada producto, se acumula el costo item por item (no solo el total
-      // global) para poder calcular su costo_unitario real más abajo.
-      for (const item of items) {
-        const recetas = await tx.recetas.findMany({
-          where: { productos_id: item.productos_id },
-          include: { insumos: true },
-        });
-
-        let costoItem = 0;
-
-        if (recetas.length === 0) {
-          // Producto de reventa (sin receta): el costo no sale de insumos,
-          // se ingresa manualmente como el total pagado por ese producto en
-          // el lote. No se calcula a partir de una receta inexistente.
-          costoItem = Number(item.costo_total ?? 0);
-          costoTotal += costoItem;
-        } else {
-          for (const r of recetas) {
-            const cantidadUsada = Number(r.cantidad) * item.cantidad;
-
-            if (cantidadUsada > 0 && !(Number(r.insumos.precio_unidad) > 0)) {
-              throw new Error(
-                `El insumo "${r.insumos.nombre}" no tiene un costo promedio verificable. Registra su costo inicial desde Insumos antes de producir.`,
-              );
-            }
-
-            const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
-
-            costoItem += costoInsumo;
-            costoTotal += costoInsumo;
-
-            movimientos.push({
-              insumos_id: r.insumos_id,
-              tipo: "salida",
-              cantidad: cantidadUsada,
-              costo_total: costoInsumo,
-              nota: `Lote de produccion`,
-              usuarios_id: usuariosId,
-            });
-
-            await asegurarBaseInsumo(tx, r.insumos);
-
-            await tx.insumos.update({
-              where: { id: r.insumos_id },
-              data: {
-                stock_actual: { decrement: cantidadUsada },
-              },
-            });
-          }
-        }
-
-        item.__costoCalculado = costoItem;
-      }
+    if (insumo.activo === false) {
+      throw errorServicio(`El insumo "${insumo.nombre}" está inactivo.`, 409);
     }
 
-    await asegurarStockNoNegativo(tx, {
-      insumos: movimientos.map((m) => m.insumos_id),
+    await asegurarBaseInsumo(tx, insumo);
+  }
+
+  const actualizados = await tx.insumos.findMany({
+    where: {
+      id: { in: insumosIds },
+      empresas_id: empresasId,
+    },
+  });
+
+  const insumosMap = new Map(actualizados.map((insumo) => [Number(insumo.id), insumo]));
+
+  const precios = new Map();
+
+  for (const [insumoId, cantidadNecesaria] of consumos) {
+    const insumo = insumosMap.get(insumoId);
+
+    if (!insumo || insumo.activo === false) {
+      throw errorServicio(`No se puede utilizar el insumo ${insumoId}.`, 409);
+    }
+
+    const stockDisponible = Number(insumo.stock_actual ?? 0);
+
+    if (stockDisponible < cantidadNecesaria) {
+      throw errorServicio(
+        `Insumo insuficiente: "${insumo.nombre}". Disponible: ${stockDisponible} ${insumo.unidad_medida}, necesario: ${cantidadNecesaria}.`,
+        409,
+      );
+    }
+
+    precios.set(insumoId, validarCostoInsumo(insumo));
+  }
+
+  return { insumosIds, insumosMap, precios };
+};
+
+const calcularCostoDesdeConsumos = (consumos, precios) => {
+  let costoTotal = 0;
+
+  const movimientos = [];
+
+  for (const [insumoId, cantidad] of consumos) {
+    const precio = precios.get(insumoId);
+
+    if (precio == null) {
+      throw errorServicio(`No se pudo obtener el costo del insumo ${insumoId}.`, 409);
+    }
+
+    const costo = redondear(cantidad * precio, 4);
+
+    costoTotal += costo;
+
+    movimientos.push({
+      insumos_id: insumoId,
+      tipo: "salida",
+      cantidad: redondear(cantidad, 3),
+      costo_total: costo,
     });
+  }
 
-    const totalUnidadesLote = items.reduce((s, i) => s + Number(i.cantidad), 0);
+  return {
+    costoTotal: redondear(costoTotal, 4),
+    movimientos,
+  };
+};
 
-    const costoUnitarioPromedioLote = totalUnidadesLote > 0 ? costoTotal / totalUnidadesLote : 0;
+const crear = async (empresasId, usuariosId, datos = {}) => {
+  return prisma.$transaction(async (tx) => {
+    const { fecha, notas, items, insumos_reales } = datos ?? {};
+
+    const insumosRealesEnviados = insumos_reales != null;
+
+    const item = validarItemsLote(items);
+
+    await validarProductos(tx, empresasId, [Number(item.productos_id)]);
+
+    const { consumos, usaCosteoInsumos } = await prepararConsumos(tx, item, insumos_reales, insumosRealesEnviados);
+
+    let costoTotal = 0;
+    let movimientos = [];
+    let insumosIds = [];
+
+    if (usaCosteoInsumos) {
+      const valorizados = await obtenerInsumosValorizados(tx, empresasId, consumos);
+
+      insumosIds = valorizados.insumosIds;
+
+      const calculo = calcularCostoDesdeConsumos(consumos, valorizados.precios);
+
+      costoTotal = calculo.costoTotal;
+      movimientos = calculo.movimientos;
+    } else {
+      costoTotal = validarCostoManual(item);
+    }
+
+    const cantidadProducto = Number(item.cantidad);
+    const costoUnitario = redondear(costoTotal / cantidadProducto, 4);
 
     const lote = await tx.lotes_produccion.create({
       data: {
@@ -352,43 +554,53 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
         usuarios_id: usuariosId,
         fecha: fechaColombiaToUTC(fecha),
         notas,
-        costo_total: costoTotal,
+        costo_total: redondear(costoTotal, 2),
 
         lotes_produccion_items: {
-          create: items.map((i) => ({
-            productos_id: i.productos_id,
-            cantidad: i.cantidad,
-            costo_unitario:
-              i.__costoCalculado != null && Number(i.cantidad) > 0 ? i.__costoCalculado / Number(i.cantidad) : costoUnitarioPromedioLote,
-          })),
+          create: {
+            productos_id: Number(item.productos_id),
+            cantidad: cantidadProducto,
+            costo_unitario: costoUnitario,
+          },
         },
       },
-      include: { lotes_produccion_items: true },
+      include: {
+        lotes_produccion_items: true,
+      },
     });
 
     if (movimientos.length > 0) {
       await tx.movimientos_insumos.createMany({
-        data: movimientos.map((m) => ({
-          ...m,
+        data: movimientos.map((movimiento) => ({
+          ...movimiento,
           lotes_produccion_id: lote.id,
+          nota: "Lote de produccion",
+          usuarios_id: usuariosId,
         })),
       });
 
-      for (const insumoId of new Set(movimientos.map((m) => m.insumos_id))) {
+      for (const insumoId of insumosIds) {
         await recalcularInsumo(tx, insumoId);
       }
-    }
 
-    for (const item of items) {
-      await tx.productos.update({
-        where: { id: item.productos_id },
-        data: { stock_actual: { increment: item.cantidad } },
+      await asegurarStockNoNegativo(tx, {
+        insumos: insumosIds,
       });
-
-      await recalcularCostoPromedioProducto(tx, item.productos_id);
     }
 
-    // Todo lote nuevo nace con su versión original (edición 0).
+    await tx.productos.update({
+      where: {
+        id: Number(item.productos_id),
+      },
+      data: {
+        stock_actual: {
+          increment: cantidadProducto,
+        },
+      },
+    });
+
+    await recalcularCostoPromedioProducto(tx, Number(item.productos_id));
+
     await registrarEdicionLote(tx, {
       loteId: lote.id,
       usuariosId,
@@ -401,322 +613,219 @@ const crear = async (empresasId, usuariosId, { fecha, notas, items, insumos_real
     return lote;
   });
 };
-const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_reales }) => {
+
+const actualizar = async (id, empresasId, usuariosId, datos = {}) => {
   return prisma.$transaction(async (tx) => {
+    const { notas, items, insumos_reales } = datos ?? {};
+
+    const insumosRealesEnviados = insumos_reales != null;
+
+    const item = validarItemsLote(items);
+
     const lote = await tx.lotes_produccion.findFirst({
-      where: { id, empresas_id: empresasId, anulado: false },
+      where: {
+        id,
+        empresas_id: empresasId,
+        anulado: false,
+      },
       include: {
         lotes_produccion_items: true,
         movimientos_insumos: true,
-        ediciones: { orderBy: { numero_edicion: "asc" } },
+        ediciones: {
+          orderBy: { numero_edicion: "asc" },
+        },
       },
     });
 
-    if (!lote) throw noEncontrado("Lote no encontrado.");
+    if (!lote) {
+      throw noEncontrado("Lote no encontrado.");
+    }
 
-    // Los lotes creados antes del historial se conservan como un registro
-    // previo incompleto: no es posible reconstruir con certeza cada edición
-    // antigua, pero sí preservar los productos y movimientos que existen.
-    let numeroNuevaEdicion = 1;
+    await validarProductos(tx, empresasId, [Number(item.productos_id)]);
 
-    if (!lote.ediciones.length) {
-      await registrarEdicionLote(tx, {
-        loteId: id,
-        usuariosId: lote.usuarios_id,
-        numeroEdicion: 0,
-        tipoRegistro: "historial_previo",
-        estado: "incompleto",
-        notas: lote.notas,
-        costoTotal: lote.costo_total,
-        soloMovimientosSinEdicion: false,
-      });
+    if (lote.lotes_produccion_items.length !== 1) {
+      throw errorServicio("Este lote antiguo no contiene exactamente un producto. Debe revisarse antes de editarlo.", 409);
+    }
 
-      await tx.movimientos_insumos.updateMany({
-        where: { lotes_produccion_id: id, edicion_id: null },
+    const movimientosAnteriores = lote.movimientos_insumos.filter((mov) => mov.tipo === "salida" && !mov.anulado);
+
+    const { consumos, usaCosteoInsumos } = await prepararConsumos(tx, item, insumos_reales, insumosRealesEnviados);
+
+    const insumosNuevosIds = [...consumos.keys()];
+
+    if (insumosNuevosIds.length > 0) {
+      await validarInsumos(tx, empresasId, insumosNuevosIds);
+    }
+
+    const insumosBloqueados = [...new Set([...movimientosAnteriores.map((mov) => Number(mov.insumos_id)), ...insumosNuevosIds])];
+
+    await bloquearInsumos(tx, insumosBloqueados);
+
+    await validarMovimientosFueraBase(tx, movimientosAnteriores);
+
+    await registrarHistorialPrevioSiHaceFalta(tx, lote, usuariosId);
+
+    const numeroNuevaEdicion =
+      lote.ediciones.length > 0 ? Math.max(...lote.ediciones.map((edicion) => Number(edicion.numero_edicion))) + 1 : 1;
+
+    if (lote.ediciones.length > 0) {
+      await tx.lotes_produccion_ediciones.updateMany({
+        where: {
+          lote_id: id,
+          estado: "vigente",
+        },
         data: {
-          edicion_id: (
-            await tx.lotes_produccion_ediciones.findFirst({
-              where: { lote_id: id, numero_edicion: 0 },
-              select: { id: true },
-            })
-          ).id,
+          estado: "reemplazada",
         },
       });
-    } else {
-      numeroNuevaEdicion = Math.max(...lote.ediciones.map((e) => e.numero_edicion)) + 1;
-
-      await tx.lotes_produccion_ediciones.updateMany({
-        where: { lote_id: id, estado: "vigente" },
-        data: { estado: "reemplazada" },
-      });
     }
 
-    validarCantidadesEnteras(items);
+    const productoAnterior = lote.lotes_produccion_items[0];
 
-    await validarProductos(
-      tx,
-      empresasId,
-      items.map((i) => i.productos_id),
-    );
-
-    await validarInsumos(
-      tx,
-      empresasId,
-      (insumos_reales ?? []).map((i) => i.insumos_id),
-    );
-
-    // Revertir stock de productos producidos anteriormente
-    for (const item of lote.lotes_produccion_items) {
-      await tx.productos.update({
-        where: { id: item.productos_id },
-        data: { stock_actual: { decrement: item.cantidad } },
-      });
-    }
-
-    // Anular los movimientos anteriores y reconstruir el inventario valorizado.
-    // Devolver solo la cantidad no recupera el costo promedio cuando el stock
-    // quedó en cero después de la producción anterior.
-    const insumosAfectados = [
-      ...new Set(lote.movimientos_insumos.filter((mov) => mov.tipo === "salida" && !mov.anulado).map((mov) => mov.insumos_id)),
-    ];
-
-    await tx.movimientos_insumos.updateMany({
-      where: { lotes_produccion_id: id, anulado: false },
-      data: { anulado: true },
+    await tx.productos.update({
+      where: { id: productoAnterior.productos_id },
+      data: {
+        stock_actual: {
+          decrement: productoAnterior.cantidad,
+        },
+      },
     });
 
-    for (const insumoId of insumosAfectados) {
+    await tx.movimientos_insumos.updateMany({
+      where: {
+        lotes_produccion_id: id,
+        anulado: false,
+      },
+      data: {
+        anulado: true,
+      },
+    });
+
+    const cantidadesAnteriores = new Map();
+
+    for (const mov of movimientosAnteriores) {
+      const insumoId = Number(mov.insumos_id);
+
+      cantidadesAnteriores.set(insumoId, redondear((cantidadesAnteriores.get(insumoId) ?? 0) + Number(mov.cantidad), 3));
+    }
+
+    for (const [insumoId, cantidad] of cantidadesAnteriores) {
       const insumo = await tx.insumos.findUnique({
         where: { id: insumoId },
       });
 
-      if (insumo?.stock_base != null && insumo?.fecha_base) {
-        // Recupera stock y precio promedio desde la base y movimientos vigentes.
+      if (!insumo) {
+        throw errorServicio(`No se encontró el insumo ${insumoId} utilizado por el lote anterior.`, 409);
+      }
+
+      const tieneBase = insumo.stock_base != null && insumo.fecha_base != null && insumo.movimiento_base_id != null;
+
+      if (tieneBase) {
         await recalcularInsumo(tx, insumoId);
       } else {
-        // Compatibilidad con movimientos anteriores al inventario valorizado:
-        // se restaura la cantidad sin inventar un costo.
-        const movimientosLegacy = lote.movimientos_insumos.filter(
-          (mov) => mov.insumos_id === insumoId && mov.tipo === "salida" && !mov.anulado,
-        );
-
-        for (const mov of movimientosLegacy) {
-          await tx.insumos.update({
-            where: { id: insumoId },
-            data: {
-              stock_actual: { increment: Number(mov.cantidad) },
-            },
-          });
-        }
-      }
-    }
-
-    // Los items se reemplazan; los movimientos anteriores quedan anulados
-    // para conservar la trazabilidad del consumo y su costo histórico.
-    await tx.lotes_produccion_items.deleteMany({
-      where: { lotes_produccion_id: id },
-    });
-
-    // Recalcular con los nuevos datos (misma lógica que crear)
-    let costoTotal = 0;
-    const movimientos = [];
-
-    if (insumos_reales?.length) {
-      for (const ir of insumos_reales) {
-        const insumo = await tx.insumos.findUnique({
-          where: { id: ir.insumos_id },
-        });
-
-        if (!insumo) continue;
-
-        if (Number(insumo.stock_actual) < Number(ir.cantidad)) {
-          throw new Error(`Insumo insuficiente: "${insumo.nombre}". Disponible: ${insumo.stock_actual}.`);
-        }
-
-        if (Number(ir.cantidad) > 0 && !(Number(insumo.precio_unidad) > 0)) {
-          throw new Error(
-            `El insumo "${insumo.nombre}" no tiene un costo promedio verificable. Registra su costo inicial desde Insumos antes de producir.`,
-          );
-        }
-      }
-
-      for (const ir of insumos_reales ?? []) {
-        const cantidad = Number(ir.cantidad);
-
-        if (!Number.isFinite(cantidad) || cantidad <= 0) {
-          throw new Error("Las cantidades de los insumos deben ser mayores que cero.");
-        }
-
-        const insumo = await tx.insumos.findUnique({
-          where: { id: ir.insumos_id },
-        });
-
-        if (!insumo) continue;
-
-        const costo = Number(ir.cantidad) * Number(insumo.precio_unidad ?? 0);
-
-        costoTotal += costo;
-
-        movimientos.push({
-          insumos_id: ir.insumos_id,
-          tipo: "salida",
-          cantidad: Number(ir.cantidad),
-          costo_total: costo,
-          nota: `Lote de produccion (editado)`,
-          usuarios_id: usuariosId,
-        });
-
-        await asegurarBaseInsumo(tx, insumo);
-
         await tx.insumos.update({
-          where: { id: ir.insumos_id },
+          where: { id: insumoId },
           data: {
-            stock_actual: { decrement: Number(ir.cantidad) },
+            stock_actual: {
+              increment: cantidad,
+            },
+            estado_costo: "sin_costo_verificable",
+            precio_unidad: null,
           },
         });
       }
-    } else {
-      // Rama de receta (igual a crear): faltaba por completo aquí, así que
-      // editar un lote sin insumos_reales no descontaba insumos ni calculaba
-      // costo. Se replica la misma lógica de validación + cálculo por item.
-      const insumosTotales = {};
-
-      for (const item of items) {
-        const recetas = await tx.recetas.findMany({
-          where: { productos_id: item.productos_id },
-          include: { insumos: true },
-        });
-
-        for (const r of recetas) {
-          const cantidadUsada = Number(r.cantidad) * item.cantidad;
-
-          insumosTotales[r.insumos_id] = (insumosTotales[r.insumos_id] || 0) + cantidadUsada;
-        }
-      }
-
-      for (const [insumoId, cantidadNecesaria] of Object.entries(insumosTotales)) {
-        const insumo = await tx.insumos.findUnique({
-          where: { id: Number(insumoId) },
-        });
-
-        if (Number(insumo.stock_actual) < cantidadNecesaria) {
-          throw new Error(
-            `Insumo insuficiente: "${insumo.nombre}". Disponible: ${insumo.stock_actual} ${insumo.unidad_medida}, necesario: ${cantidadNecesaria}.`,
-          );
-        }
-      }
-
-      for (const item of items) {
-        const recetas = await tx.recetas.findMany({
-          where: { productos_id: item.productos_id },
-          include: { insumos: true },
-        });
-
-        let costoItem = 0;
-
-        if (recetas.length === 0) {
-          costoItem = Number(item.costo_total ?? 0);
-          costoTotal += costoItem;
-        } else {
-          for (const r of recetas) {
-            const cantidadUsada = Number(r.cantidad) * item.cantidad;
-
-            if (cantidadUsada > 0 && !(Number(r.insumos.precio_unidad) > 0)) {
-              throw new Error(
-                `El insumo "${r.insumos.nombre}" no tiene un costo promedio verificable. Registra su costo inicial desde Insumos antes de producir.`,
-              );
-            }
-
-            const costoInsumo = cantidadUsada * Number(r.insumos.precio_unidad ?? 0);
-
-            costoItem += costoInsumo;
-            costoTotal += costoInsumo;
-
-            movimientos.push({
-              insumos_id: r.insumos_id,
-              tipo: "salida",
-              cantidad: cantidadUsada,
-              costo_total: costoInsumo,
-              nota: `Lote de produccion (editado)`,
-              usuarios_id: usuariosId,
-            });
-
-            await asegurarBaseInsumo(tx, r.insumos);
-
-            await tx.insumos.update({
-              where: { id: r.insumos_id },
-              data: {
-                stock_actual: { decrement: cantidadUsada },
-              },
-            });
-          }
-        }
-
-        item.__costoCalculado = costoItem;
-      }
     }
-    await asegurarStockNoNegativo(tx, {
-      insumos: movimientos.map((m) => m.insumos_id),
-    });
 
-    const totalUnidadesLote = items.reduce((s, i) => s + Number(i.cantidad), 0);
+    let costoTotal = 0;
+    let movimientos = [];
+    let insumosIds = [];
 
-    const costoUnitarioPromedioLote = totalUnidadesLote > 0 ? costoTotal / totalUnidadesLote : 0;
+    if (usaCosteoInsumos) {
+      const valorizados = await obtenerInsumosValorizados(tx, empresasId, consumos);
 
-    // Crear nuevos items
-    await tx.lotes_produccion_items.createMany({
-      data: items.map((i) => ({
+      insumosIds = valorizados.insumosIds;
+
+      const calculo = calcularCostoDesdeConsumos(consumos, valorizados.precios);
+
+      costoTotal = calculo.costoTotal;
+      movimientos = calculo.movimientos;
+    } else {
+      // Los productos sin receta nunca toman el costo de sus movimientos
+      // antiguos: el costo vigente se ingresa manualmente.
+      costoTotal = validarCostoManual(item);
+    }
+
+    const cantidadProducto = Number(item.cantidad);
+    const costoUnitario = redondear(costoTotal / cantidadProducto, 4);
+
+    await tx.lotes_produccion_items.deleteMany({
+      where: {
         lotes_produccion_id: id,
-        productos_id: i.productos_id,
-        cantidad: i.cantidad,
-        costo_unitario:
-          i.__costoCalculado != null && Number(i.cantidad) > 0 ? i.__costoCalculado / Number(i.cantidad) : costoUnitarioPromedioLote,
-      })),
+      },
     });
 
-    if (movimientos.length) {
+    await tx.lotes_produccion_items.create({
+      data: {
+        lotes_produccion_id: id,
+        productos_id: Number(item.productos_id),
+        cantidad: cantidadProducto,
+        costo_unitario: costoUnitario,
+      },
+    });
+
+    if (movimientos.length > 0) {
       await tx.movimientos_insumos.createMany({
-        data: movimientos.map((m) => ({
-          ...m,
+        data: movimientos.map((movimiento) => ({
+          ...movimiento,
           lotes_produccion_id: id,
+          nota: "Lote de produccion (editado)",
+          usuarios_id: usuariosId,
         })),
       });
 
-      for (const insumoId of new Set(movimientos.map((m) => m.insumos_id))) {
+      for (const insumoId of insumosIds) {
         await recalcularInsumo(tx, insumoId);
       }
-    }
 
-    // Sumar stock nuevo
-    for (const item of items) {
-      await tx.productos.update({
-        where: { id: item.productos_id },
-        data: { stock_actual: { increment: item.cantidad } },
+      await asegurarStockNoNegativo(tx, {
+        insumos: insumosIds,
       });
     }
+
+    await tx.productos.update({
+      where: {
+        id: Number(item.productos_id),
+      },
+      data: {
+        stock_actual: {
+          increment: cantidadProducto,
+        },
+      },
+    });
 
     await asegurarStockNoNegativo(
       tx,
       {
-        productos: [...lote.lotes_produccion_items, ...items].map((i) => i.productos_id),
+        productos: [productoAnterior.productos_id, Number(item.productos_id)],
       },
       {
-        mensajeProducto: (p) =>
+        mensajeProducto: (producto) =>
           'No se puede editar el lote: ya se vendieron unidades de "' +
-          p.nombre +
+          producto.nombre +
           '" y el stock quedaría en ' +
-          p.stock_actual +
+          producto.stock_actual +
           ". Ajusta o anula esas ventas primero.",
       },
     );
 
     const actualizado = await tx.lotes_produccion.update({
       where: { id },
-      data: { notas, costo_total: costoTotal },
+      data: {
+        notas,
+        costo_total: redondear(costoTotal, 2),
+      },
     });
 
-    // Guarda la fotografía completa de esta nueva versión y vincula únicamente
-    // los movimientos recién creados. Los anteriores permanecen en su edición.
     await registrarEdicionLote(tx, {
       loteId: id,
       usuariosId,
@@ -727,8 +836,10 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
       costoTotal,
     });
 
-    for (const productoId of new Set([...lote.lotes_produccion_items.map((i) => i.productos_id), ...items.map((i) => i.productos_id)])) {
-      await recalcularCostoPromedioProducto(tx, productoId);
+    await recalcularCostoPromedioProducto(tx, productoAnterior.productos_id);
+
+    if (Number(item.productos_id) !== Number(productoAnterior.productos_id)) {
+      await recalcularCostoPromedioProducto(tx, Number(item.productos_id));
     }
 
     return actualizado;
@@ -738,11 +849,17 @@ const actualizar = async (id, empresasId, usuariosId, { notas, items, insumos_re
 const anular = async (id, empresasId, motivo) => {
   return prisma.$transaction(async (tx) => {
     const lote = await tx.lotes_produccion.findFirst({
-      where: { id, empresas_id: empresasId, anulado: false },
+      where: {
+        id,
+        empresas_id: empresasId,
+        anulado: false,
+      },
       include: {
         lotes_produccion_items: true,
         movimientos_insumos: true,
-        ediciones: true,
+        ediciones: {
+          orderBy: { numero_edicion: "asc" },
+        },
       },
     });
 
@@ -750,63 +867,90 @@ const anular = async (id, empresasId, motivo) => {
       throw noEncontrado("Lote no encontrado o ya anulado.");
     }
 
-    // Revertir stock de productos
-    for (const item of lote.lotes_produccion_items) {
-      await tx.productos.update({
-        where: { id: item.productos_id },
-        data: { stock_actual: { decrement: item.cantidad } },
-      });
+    if (lote.lotes_produccion_items.length !== 1) {
+      throw errorServicio("Este lote no contiene exactamente un producto. Debe revisarse antes de anularlo.", 409);
     }
+
+    const movimientosAnteriores = lote.movimientos_insumos.filter((mov) => mov.tipo === "salida" && !mov.anulado);
+
+    const insumosIds = [...new Set(movimientosAnteriores.map((mov) => Number(mov.insumos_id)))];
+
+    await bloquearInsumos(tx, insumosIds);
+
+    await validarMovimientosFueraBase(tx, movimientosAnteriores);
+
+    await registrarHistorialPrevioSiHaceFalta(tx, lote, lote.usuarios_id);
+
+    const item = lote.lotes_produccion_items[0];
+
+    await tx.productos.update({
+      where: {
+        id: item.productos_id,
+      },
+      data: {
+        stock_actual: {
+          decrement: item.cantidad,
+        },
+      },
+    });
 
     await asegurarStockNoNegativo(
       tx,
       {
-        productos: lote.lotes_produccion_items.map((i) => i.productos_id),
+        productos: [item.productos_id],
       },
       {
-        mensajeProducto: (p) =>
+        mensajeProducto: (producto) =>
           'No se puede anular el lote: ya se vendieron unidades de "' +
-          p.nombre +
+          producto.nombre +
           '" y el stock quedaría en ' +
-          p.stock_actual +
+          producto.stock_actual +
           ". Ajusta o anula esas ventas primero.",
       },
     );
-
-    // Anular los movimientos de consumo. Si el insumo ya tiene línea base,
-    // reconstruimos cantidad y promedio desde el historial valorizado.
-    const insumosAfectados = [
-      ...new Set(lote.movimientos_insumos.filter((m) => m.tipo === "salida" && !m.anulado).map((m) => m.insumos_id)),
-    ];
 
     await tx.movimientos_insumos.updateMany({
       where: {
         lotes_produccion_id: id,
         anulado: false,
       },
-      data: { anulado: true },
+      data: {
+        anulado: true,
+      },
     });
 
-    for (const insumoId of insumosAfectados) {
+    const cantidadesAnteriores = new Map();
+
+    for (const mov of movimientosAnteriores) {
+      const insumoId = Number(mov.insumos_id);
+
+      cantidadesAnteriores.set(insumoId, redondear((cantidadesAnteriores.get(insumoId) ?? 0) + Number(mov.cantidad), 3));
+    }
+
+    for (const [insumoId, cantidad] of cantidadesAnteriores) {
       const insumo = await tx.insumos.findUnique({
         where: { id: insumoId },
       });
 
-      if (insumo?.stock_base != null && insumo?.fecha_base) {
+      if (!insumo) {
+        throw errorServicio(`No se encontró el insumo ${insumoId} utilizado por el lote.`, 409);
+      }
+
+      const tieneBase = insumo.stock_base != null && insumo.fecha_base != null && insumo.movimiento_base_id != null;
+
+      if (tieneBase) {
         await recalcularInsumo(tx, insumoId);
       } else {
-        const movimientosLegacy = lote.movimientos_insumos.filter((m) => m.insumos_id === insumoId && m.tipo === "salida" && !m.anulado);
-
-        for (const mov of movimientosLegacy) {
-          await tx.insumos.update({
-            where: { id: insumoId },
-            data: {
-              stock_actual: {
-                increment: Number(mov.cantidad),
-              },
+        await tx.insumos.update({
+          where: { id: insumoId },
+          data: {
+            stock_actual: {
+              increment: cantidad,
             },
-          });
-        }
+            precio_unidad: null,
+            estado_costo: "sin_costo_verificable",
+          },
+        });
       }
     }
 
@@ -815,7 +959,9 @@ const anular = async (id, empresasId, motivo) => {
         lote_id: id,
         estado: "vigente",
       },
-      data: { estado: "anulada" },
+      data: {
+        estado: "anulada",
+      },
     });
 
     const anulado = await tx.lotes_produccion.update({
@@ -826,9 +972,7 @@ const anular = async (id, empresasId, motivo) => {
       },
     });
 
-    for (const productoId of new Set(lote.lotes_produccion_items.map((i) => i.productos_id))) {
-      await recalcularCostoPromedioProducto(tx, productoId);
-    }
+    await recalcularCostoPromedioProducto(tx, item.productos_id);
 
     return anulado;
   });

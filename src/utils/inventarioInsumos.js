@@ -1,7 +1,18 @@
-const errorInventario = (mensaje) => Object.assign(new Error(mensaje), { status: 409 });
+import { Prisma } from "../../generated/prisma/index.js";
 
-// Bloquea la fila del insumo.
-// Debe ejecutarse dentro de una transacción.
+const errorInventario = (mensaje, status = 409) => Object.assign(new Error(mensaje), { status });
+
+const numero = (valor) => {
+  if (valor == null) return null;
+  const n = Number(valor);
+  return Number.isFinite(n) ? n : null;
+};
+
+const redondear = (valor, decimales = 4) => {
+  const factor = 10 ** decimales;
+  return Math.round((valor + Number.EPSILON) * factor) / factor;
+};
+
 const bloquearInsumo = async (tx, insumoId) => {
   await tx.$queryRaw`
     SELECT id
@@ -11,64 +22,68 @@ const bloquearInsumo = async (tx, insumoId) => {
   `;
 };
 
-// Mantiene una base histórica inmutable.
-// Solo inicializa insumos que todavía no tienen una base.
+const validarBase = (insumo) => {
+  const tieneStock = insumo.stock_base != null;
+  const tieneValor = insumo.valor_base != null;
+  const tieneFecha = insumo.fecha_base != null;
+  const tieneMovimiento = insumo.movimiento_base_id != null;
+
+  const campos = [tieneStock, tieneFecha, tieneMovimiento];
+
+  if (campos.some(Boolean) && !campos.every(Boolean)) {
+    throw errorInventario("El inventario tiene una base histórica incompleta. Se requiere revisión.");
+  }
+
+  if (tieneStock && !Number.isFinite(Number(insumo.stock_base))) {
+    throw errorInventario("La cantidad de la base histórica no es válida.");
+  }
+
+  if (tieneValor && !Number.isFinite(Number(insumo.valor_base))) {
+    throw errorInventario("El valor de la base histórica no es válido.");
+  }
+
+  if (!tieneStock && insumo.valor_base != null) {
+    throw errorInventario("El inventario tiene un valor base sin punto de corte histórico. Se requiere revisión.");
+  }
+
+  return tieneStock && tieneFecha && tieneMovimiento;
+};
+
+// Crea una base histórica una sola vez.
+// Nunca deduce que un costo es verificable únicamente porque el stock sea cero.
 export const asegurarBaseInsumo = async (tx, insumo) => {
   await bloquearInsumo(tx, insumo.id);
 
-  // Volvemos a consultar después del bloqueo.
   const actual = await tx.insumos.findUnique({
     where: { id: insumo.id },
   });
 
   if (!actual) {
-    throw Object.assign(new Error("El insumo no existe."), {
-      status: 404,
-    });
+    throw errorInventario("El insumo no existe.", 404);
   }
 
-  const tieneStockBase = actual.stock_base != null;
-  const tieneFechaBase = actual.fecha_base != null;
-  const tieneMovimientoBase = actual.movimiento_base_id != null;
-
-  // La base ya está inicializada.
-  if (tieneStockBase && tieneFechaBase && tieneMovimientoBase) {
+  if (validarBase(actual)) {
     return actual;
   }
 
-  // No permitimos bases parciales.
-  if (tieneStockBase || tieneFechaBase || tieneMovimientoBase) {
-    throw errorInventario("El inventario tiene una base histórica incompleta o sin punto de corte. Se requiere revisión.");
+  const stockBase = numero(actual.stock_actual ?? 0);
+  const precioBase = numero(actual.precio_unidad);
+
+  if (stockBase == null || stockBase < 0) {
+    throw errorInventario("El stock inicial del insumo no es válido.");
   }
 
-  const stockBase = Number(actual.stock_actual ?? 0);
-  const precioBase = Number(actual.precio_unidad ?? 0);
-
-  if (!Number.isFinite(stockBase) || stockBase < 0 || !Number.isFinite(precioBase) || precioBase < 0) {
-    throw errorInventario("El stock o el precio del insumo tienen valores inválidos.");
-  }
-
-  // Solo confiamos en costos con un estado explícitamente verificable.
-  // No inferimos verificabilidad por el simple hecho de tener stock cero.
   const costoConfiable = actual.estado_costo === "verificado" || actual.estado_costo === "historico_calculado";
 
-  const valorBase = costoConfiable ? stockBase * precioBase : null;
+  const costoVerificable = costoConfiable && precioBase != null && precioBase >= 0;
 
-  // Capturamos el último movimiento existente.
-  // Los movimientos posteriores tendrán un ID mayor.
+  const valorBase = costoVerificable ? redondear(stockBase * precioBase) : null;
+
   const ultimoMovimiento = await tx.movimientos_insumos.findFirst({
-    where: {
-      insumos_id: actual.id,
-    },
-    orderBy: {
-      id: "desc",
-    },
-    select: {
-      id: true,
-    },
+    where: { insumos_id: actual.id },
+    orderBy: { id: "desc" },
+    select: { id: true },
   });
-
-  const movimientoBaseId = ultimoMovimiento?.id ?? 0;
 
   return tx.insumos.update({
     where: { id: actual.id },
@@ -76,16 +91,15 @@ export const asegurarBaseInsumo = async (tx, insumo) => {
       stock_base: stockBase,
       valor_base: valorBase,
       fecha_base: new Date(),
-      movimiento_base_id: movimientoBaseId,
-      estado_costo: valorBase === null ? "sin_costo_verificable" : stockBase > 0 ? "historico_calculado" : "verificado",
+      movimiento_base_id: ultimoMovimiento?.id ?? 0,
+      estado_costo: costoVerificable ? (stockBase > 0 ? "historico_calculado" : "verificado") : "sin_costo_verificable",
     },
   });
 };
 
-// Reconstruye el inventario desde su base histórica
-// y los movimientos posteriores al punto de corte.
+// Reconstruye el inventario desde la base histórica y sus movimientos posteriores.
+// Debe ejecutarse dentro de una transacción.
 export const recalcularInsumo = async (tx, insumoId) => {
-  // Bloqueamos antes de leer la base y los movimientos.
   await bloquearInsumo(tx, insumoId);
 
   const insumo = await tx.insumos.findUnique({
@@ -94,107 +108,80 @@ export const recalcularInsumo = async (tx, insumoId) => {
 
   if (!insumo) return null;
 
-  const tieneStockBase = insumo.stock_base != null;
-  const tieneFechaBase = insumo.fecha_base != null;
-  const tieneMovimientoBase = insumo.movimiento_base_id != null;
-
-  // Un insumo sin base todavía no puede reconstruirse.
-  if (!tieneStockBase && !tieneFechaBase && !tieneMovimientoBase) {
+  if (!validarBase(insumo)) {
     return insumo;
   }
 
-  // Una base parcial no es segura.
-  if (!tieneStockBase || !tieneFechaBase || !tieneMovimientoBase) {
-    throw errorInventario("No se puede reconstruir el inventario: la base histórica está incompleta.");
-  }
-
-  const stockBase = Number(insumo.stock_base);
+  const stockBase = numero(insumo.stock_base);
   const movimientoBaseId = Number(insumo.movimiento_base_id);
 
-  if (!Number.isFinite(stockBase) || stockBase < 0 || !Number.isInteger(movimientoBaseId) || movimientoBaseId < 0) {
-    throw errorInventario("La base histórica del insumo contiene valores inválidos.");
+  if (stockBase == null || stockBase < 0 || !Number.isInteger(movimientoBaseId) || movimientoBaseId < 0) {
+    throw errorInventario("La base histórica del insumo no es válida.");
+  }
+
+  let cantidad = stockBase;
+  let valor = numero(insumo.valor_base);
+
+  if (insumo.valor_base != null && (valor == null || valor < 0)) {
+    throw errorInventario("El valor de la base histórica no es válido.");
   }
 
   const movimientos = await tx.movimientos_insumos.findMany({
     where: {
       insumos_id: insumoId,
       anulado: false,
-      id: {
-        gt: movimientoBaseId,
-      },
+      id: { gt: movimientoBaseId },
     },
-    orderBy: {
-      id: "asc",
-    },
+    orderBy: { id: "asc" },
   });
 
-  let cantidad = stockBase;
+  for (const movimiento of movimientos) {
+    const qty = numero(movimiento.cantidad);
+    const costo = numero(movimiento.costo_total);
 
-  // Si la base no tiene costo verificable, el valor permanece desconocido.
-  let valor = insumo.valor_base == null ? null : Number(insumo.valor_base);
-
-  if (valor !== null && (!Number.isFinite(valor) || valor < 0)) {
-    throw errorInventario("El valor de la base histórica es inválido.");
-  }
-
-  for (const mov of movimientos) {
-    const qty = Number(mov.cantidad);
-
-    const costo = mov.costo_total == null ? null : Number(mov.costo_total);
-
-    if (!Number.isFinite(qty)) {
-      throw errorInventario(`El movimiento ${mov.id} tiene una cantidad inválida.`);
+    if (qty == null || !Number.isFinite(qty)) {
+      throw errorInventario(`El movimiento #${movimiento.id} tiene una cantidad inválida.`);
     }
 
-    if (mov.tipo === "entrada") {
+    if (movimiento.tipo === "entrada") {
       if (qty <= 0) {
-        throw errorInventario(`La entrada ${mov.id} tiene una cantidad inválida.`);
+        throw errorInventario(`La entrada #${movimiento.id} tiene una cantidad inválida.`);
       }
 
       cantidad += qty;
 
-      // Una entrada sin costo verificable invalida el valor global.
       if (valor !== null) {
-        if (costo === null || !Number.isFinite(costo) || costo < 0) {
+        if (costo == null || costo < 0) {
           valor = null;
         } else {
           valor += costo;
         }
       }
-    } else if (mov.tipo === "salida") {
+    } else if (movimiento.tipo === "salida") {
       if (qty <= 0) {
-        throw errorInventario(`La salida ${mov.id} tiene una cantidad inválida.`);
+        throw errorInventario(`La salida #${movimiento.id} tiene una cantidad inválida.`);
       }
 
       cantidad -= qty;
 
       if (valor !== null) {
-        if (costo === null || !Number.isFinite(costo) || costo < 0) {
+        if (costo == null || costo < 0) {
           valor = null;
         } else {
           valor -= costo;
         }
       }
-    } else if (mov.tipo === "ajuste") {
-      if (qty === 0) continue;
-
+    } else if (movimiento.tipo === "ajuste") {
       if (qty > 0) {
-        // No conocemos el costo de las unidades encontradas.
-        // El costo global seguirá desconocido hasta una conciliación.
+        // Un aumento por conteo físico no demuestra cuánto costó
+        // la mercancía incorporada al inventario.
         cantidad += qty;
         valor = null;
-      } else {
-        // El ajuste negativo utiliza el costo registrado al realizarlo.
-        const cantidadRetirada = Math.abs(qty);
-
-        if (cantidadRetirada > cantidad + 0.0005) {
-          throw errorInventario(`El ajuste dejaría negativo el inventario de "${insumo.nombre}".`);
-        }
-
-        cantidad -= cantidadRetirada;
+      } else if (qty < 0) {
+        cantidad += qty;
 
         if (valor !== null) {
-          if (costo === null || !Number.isFinite(costo) || costo < 0) {
+          if (costo == null || costo < 0) {
             valor = null;
           } else {
             valor -= costo;
@@ -202,42 +189,38 @@ export const recalcularInsumo = async (tx, insumoId) => {
         }
       }
     } else {
-      throw errorInventario(`El movimiento ${mov.id} tiene un tipo desconocido.`);
+      throw errorInventario(`El movimiento #${movimiento.id} tiene un tipo desconocido.`);
     }
-  }
 
-  if (cantidad < -0.0005) {
-    throw errorInventario(`El inventario de "${insumo.nombre}" quedaría negativo al recalcular.`);
-  }
+    if (cantidad < -0.0005) {
+      throw errorInventario(`El movimiento #${movimiento.id} deja el inventario con stock negativo.`);
+    }
 
-  if (Math.abs(cantidad) < 0.0005) {
-    cantidad = 0;
+    if (Math.abs(cantidad) < 0.0005) {
+      cantidad = 0;
+      if (valor !== null) valor = 0;
+    }
 
-    if (valor !== null) {
+    if (valor !== null && valor < -0.01) {
+      throw errorInventario(`El movimiento #${movimiento.id} deja un valor de inventario negativo.`);
+    }
+
+    if (valor !== null && Math.abs(valor) < 0.01) {
       valor = 0;
     }
   }
 
-  if (valor !== null && valor < -0.01) {
-    throw errorInventario(`El valor del inventario de "${insumo.nombre}" quedaría negativo al recalcular.`);
-  }
+  cantidad = redondear(cantidad, 3);
 
-  if (valor !== null && Math.abs(valor) < 0.01) {
-    valor = 0;
-  }
-
-  const promedio = valor === null ? null : cantidad > 0 ? valor / cantidad : 0;
-
-  // El estado se deriva de la verificabilidad reconstruida.
-  // No se recupera automáticamente si hubo movimientos desconocidos.
-  const estadoCosto = valor === null ? "sin_costo_verificable" : stockBase > 0 ? "historico_calculado" : "verificado";
+  const costoVerificable = valor !== null;
+  const precioPromedio = costoVerificable ? (cantidad > 0 ? redondear(valor / cantidad, 4) : 0) : null;
 
   return tx.insumos.update({
     where: { id: insumoId },
     data: {
-      stock_actual: cantidad,
-      precio_unidad: promedio,
-      estado_costo: estadoCosto,
+      stock_actual: new Prisma.Decimal(cantidad.toFixed(3)),
+      precio_unidad: precioPromedio === null ? null : new Prisma.Decimal(precioPromedio.toFixed(4)),
+      estado_costo: costoVerificable ? (Number(insumo.stock_base) > 0 ? "historico_calculado" : "verificado") : "sin_costo_verificable",
     },
   });
 };
