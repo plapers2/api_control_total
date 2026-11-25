@@ -9,6 +9,19 @@ import { registrarRecuperacionVenta, recalcularRecuperacionesVenta, recalcularFo
 
 const badRequest = (mensaje) => Object.assign(new Error(mensaje), { status: 400 });
 const centavos = (n) => Math.round(Number(n) * 100);
+const transaccionConReintento = async (operacion, maxIntentos = 3) => {
+  for (let intento = 1; ; intento++) {
+    try {
+      return await prisma.$transaction(operacion);
+    } catch (error) {
+      if (error?.code !== "P2034" || intento >= maxIntentos) {
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50 * intento));
+    }
+  }
+};
 
 const CONSUMO = "consumo_propio";
 const CANALES = ["punto_venta", "domicilio", "encargo", CONSUMO];
@@ -281,7 +294,7 @@ const crear = async (
   const items = itemsSegunCanal(canal, itemsEntrada);
   const clientes_id = esConsumo ? null : clienteEntrada;
   const credito = esConsumo ? false : creditoEntrada;
-  return prisma.$transaction(async (tx) => {
+  return transaccionConReintento(async (tx) => {
     validarItemsVenta(items);
     validarCanal(canal);
     const canalFinal = canal ?? "punto_venta";
