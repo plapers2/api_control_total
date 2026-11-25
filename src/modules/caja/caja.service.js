@@ -800,8 +800,17 @@ const anular = async (id, empresasId, motivo) => {
   return prisma.$transaction(async (tx) => {
     const mov = await tx.movimientos_caja.findFirst({
       where: { id, empresas_id: empresasId, anulado: false },
-      include: { compra_insumos: { include: { items: { include: { movimiento_insumos: true } } } } },
+      include: {
+        compra_insumos: {
+          include: {
+            items: {
+              include: { movimiento_insumos: true },
+            },
+          },
+        },
+      },
     });
+
     if (!mov) throw noEncontrado("Movimiento no encontrado o ya anulado.");
     rechazarSiEsDeVenta(mov);
 
@@ -827,14 +836,63 @@ const anular = async (id, empresasId, motivo) => {
         data: { anulada: true },
       });
 
-      await anularUsoCompra(tx, empresasId, mov.compra_insumos.id, mov.id);
-
       for (const insumoId of ids) {
         await recalcularInsumo(tx, insumoId);
       }
     }
 
-    return tx.movimientos_caja.update({ where: { id }, data: { anulado: true, motivo_anulacion: motivo } });
+    // Anular el evento del fondo tanto para compras estructuradas
+    // como para compras históricas sin detalle de inventario.
+    await anularUsoCompra(tx, empresasId, mov.compra_insumos?.id ?? null, mov.id);
+
+    // Actualizar los contadores y el estado histórico del fondo.
+    const comprasSinDetalle = await tx.fondo_reposicion_movimientos.count({
+      where: {
+        empresas_id: empresasId,
+        tipo: "compra",
+        anulado: false,
+        estado_calculo: "incompleto",
+      },
+    });
+
+    const eventosSinCosto = await tx.fondo_reposicion_movimientos.count({
+      where: {
+        empresas_id: empresasId,
+        anulado: false,
+        estado_calculo: "sin_costo_verificable",
+      },
+    });
+
+    const config = await tx.fondo_reposicion_config.findUnique({
+      where: { empresas_id: empresasId },
+    });
+
+    const ventasIncompletas = Number(config?.ventas_incompletas ?? 0);
+
+    const estadoHistorico =
+      ventasIncompletas > 0 || comprasSinDetalle > 0 ? "incompleto" : eventosSinCosto > 0 ? "sin_costo_verificable" : "historico_calculado";
+
+    await tx.fondo_reposicion_config.upsert({
+      where: { empresas_id: empresasId },
+      create: {
+        empresas_id: empresasId,
+        estado_historico: estadoHistorico,
+        ventas_incompletas: ventasIncompletas,
+        compras_sin_detalle: comprasSinDetalle,
+      },
+      update: {
+        estado_historico: estadoHistorico,
+        compras_sin_detalle: comprasSinDetalle,
+      },
+    });
+
+    return tx.movimientos_caja.update({
+      where: { id },
+      data: {
+        anulado: true,
+        motivo_anulacion: motivo,
+      },
+    });
   });
 };
 
