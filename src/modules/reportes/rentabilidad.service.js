@@ -4,6 +4,62 @@ import { construirRangoFecha } from "../../utils/rangoFecha.js";
 const SERVICIOS = ["energia", "agua", "gas"];
 const CAMPO_USA = { energia: "usa_energia", agua: "usa_agua", gas: "usa_gas" };
 
+const MILISEGUNDOS_DIA = 24 * 60 * 60 * 1000;
+const DESFASE_COLOMBIA = 5 * 60 * 60 * 1000;
+
+// Obtiene el día calendario colombiano de una fecha UTC.
+const diaCalendarioColombia = (fecha) => {
+  const local = new Date(fecha.getTime() - DESFASE_COLOMBIA);
+
+  return Math.floor(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) / MILISEGUNDOS_DIA);
+};
+
+// Los movimientos históricos sin periodo_servicio utilizan su fecha de Caja.
+const obtenerPeriodoServicio = (movimiento) => {
+  const periodo = String(movimiento.periodo_servicio ?? "");
+
+  if (/^\d{4}-(0[1-9]|1[0-2])$/.test(periodo)) {
+    return periodo;
+  }
+
+  return movimiento.fecha.toISOString().slice(0, 7);
+};
+
+// Calcula qué proporción de la factura mensual corresponde al rango consultado.
+const proporcionPeriodoEnRango = (periodo, rangoFecha) => {
+  if (!rangoFecha) {
+    return { proporcion: 1, prorrateado: false };
+  }
+
+  const coincidencia = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(periodo);
+
+  if (!coincidencia) {
+    return { proporcion: 0, prorrateado: false };
+  }
+
+  const year = Number(coincidencia[1]);
+  const month = Number(coincidencia[2]);
+
+  const inicioMes = Date.UTC(year, month - 1, 1) / MILISEGUNDOS_DIA;
+
+  const finMes = Date.UTC(year, month, 0) / MILISEGUNDOS_DIA;
+
+  const inicioRango = diaCalendarioColombia(rangoFecha.gte);
+  const finRango = diaCalendarioColombia(rangoFecha.lte);
+
+  const inicioIncluido = Math.max(inicioMes, inicioRango);
+  const finIncluido = Math.min(finMes, finRango);
+
+  const diasIncluidos = Math.max(0, finIncluido - inicioIncluido + 1);
+
+  const diasDelMes = finMes - inicioMes + 1;
+
+  return {
+    proporcion: diasIncluidos / diasDelMes,
+    prorrateado: diasIncluidos > 0 && diasIncluidos < diasDelMes,
+  };
+};
+
 // Por cada servicio (energia/agua/gas), calcula el costo indirecto por unidad
 // en un rango de fecha dado:
 //   gasto del periodo (categoria=servicio_publico, ese tipo_servicio)
@@ -11,26 +67,55 @@ const CAMPO_USA = { energia: "usa_energia", agua: "usa_agua", gas: "usa_gas" };
 //     ese servicio (usa_energia/usa_agua/usa_gas = true).
 // Ambos lados del cálculo usan aggregate (sin traer filas), igual que el
 // resto de Caja/Ventas/Producción.
+
 const calcularIndirectosPorServicio = async (empresasId, rangoFecha) => {
+  const movimientos = await prisma.movimientos_caja.findMany({
+    where: {
+      empresas_id: empresasId,
+      anulado: false,
+      tipo: "gasto",
+      categoria: "servicio_publico",
+      tipo_servicio: { in: SERVICIOS },
+    },
+    select: {
+      tipo_servicio: true,
+      fecha: true,
+      periodo_servicio: true,
+      monto: true,
+    },
+  });
+
+  const gastosPorServicio = Object.fromEntries(SERVICIOS.map((servicio) => [servicio, 0]));
+
+  const serviciosProrrateados = new Set();
+
+  for (const movimiento of movimientos) {
+    const periodo = obtenerPeriodoServicio(movimiento);
+
+    const { proporcion, prorrateado } = proporcionPeriodoEnRango(periodo, rangoFecha);
+
+    if (!(proporcion > 0)) continue;
+
+    const servicio = movimiento.tipo_servicio;
+
+    gastosPorServicio[servicio] += Number(movimiento.monto) * proporcion;
+
+    if (prorrateado) {
+      serviciosProrrateados.add(servicio);
+    }
+  }
+
   const resultado = {};
 
   for (const servicio of SERVICIOS) {
-    const gastoAgg = await prisma.movimientos_caja.aggregate({
-      where: {
-        empresas_id: empresasId,
-        anulado: false,
-        tipo: "gasto",
-        categoria: "servicio_publico",
-        tipo_servicio: servicio,
-        ...(rangoFecha && { fecha: rangoFecha }),
-      },
-      _sum: { monto: true },
-    });
-    const gasto = Number(gastoAgg._sum.monto ?? 0);
+    const gasto = gastosPorServicio[servicio];
 
     const unidadesAgg = await prisma.lotes_produccion_items.aggregate({
       where: {
-        productos: { empresas_id: empresasId, [CAMPO_USA[servicio]]: true },
+        productos: {
+          empresas_id: empresasId,
+          [CAMPO_USA[servicio]]: true,
+        },
         lotes_produccion: {
           empresas_id: empresasId,
           anulado: false,
@@ -39,13 +124,14 @@ const calcularIndirectosPorServicio = async (empresasId, rangoFecha) => {
       },
       _sum: { cantidad: true },
     });
+
     const unidades = Number(unidadesAgg._sum.cantidad ?? 0);
 
     resultado[servicio] = {
       gasto,
       unidades,
       costoUnitario: unidades > 0 ? gasto / unidades : 0,
-      estimado: false,
+      estimado: serviciosProrrateados.has(servicio),
     };
   }
 
@@ -57,17 +143,37 @@ const calcularIndirectosPorServicio = async (empresasId, rangoFecha) => {
 // histórico completo (sin filtro de fecha) como respaldo, en vez de dejar el
 // indirecto en $0 de forma engañosa. Se marca estimado:true para que el
 // frontend lo indique ("costo estimado, aún no cerró el mes").
+
+// Cuando faltan unidades producidas o no hay factura registrada,
+// se utiliza el costo unitario histórico como estimación.
+//
+// Se conservan siempre el gasto y las unidades reales del periodo.
+// Así no se presentan gastos históricos acumulados como si fueran
+// gastos del mes consultado.
 const calcularIndirectosConFallback = async (empresasId, rangoFecha) => {
   const actual = await calcularIndirectosPorServicio(empresasId, rangoFecha);
-  const faltantes = SERVICIOS.filter((s) => actual[s].unidades === 0);
-  if (faltantes.length === 0 || !rangoFecha) return actual;
+
+  // En el histórico completo no necesitamos fallback.
+  if (!rangoFecha) return actual;
+
+  const faltantes = SERVICIOS.filter((servicio) => actual[servicio].unidades === 0 || actual[servicio].gasto === 0);
+
+  if (faltantes.length === 0) return actual;
 
   const historico = await calcularIndirectosPorServicio(empresasId, undefined);
-  for (const s of faltantes) {
-    if (historico[s].unidades > 0) {
-      actual[s] = { ...historico[s], estimado: true };
+
+  for (const servicio of faltantes) {
+    const costoHistorico = historico[servicio].costoUnitario;
+
+    if (historico[servicio].unidades > 0 && costoHistorico > 0) {
+      actual[servicio] = {
+        ...actual[servicio],
+        costoUnitario: costoHistorico,
+        estimado: true,
+      };
     }
   }
+
   return actual;
 };
 

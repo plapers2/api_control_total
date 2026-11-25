@@ -4,7 +4,11 @@ import { construirRangoFecha } from "../../utils/rangoFecha.js";
 import { validarInsumos } from "../../utils/pertenencia.js";
 import { noEncontrado } from "../../utils/errors.js";
 import { asegurarBaseInsumo, recalcularInsumo } from "../../utils/inventarioInsumos.js";
-import { resumen as resumenServicios } from "../servicios-publicos/servicios-publicos.service.js";
+import {
+  bloquearEmpresaServiciosPublicos,
+  validarPeriodoControlado,
+  validarReciboUnico,
+} from "../servicios-publicos/servicios-publicos.service.js";
 import { registrarUsoCompra, actualizarUsoCompra, anularUsoCompra } from "../fondo-reposicion/fondo.service.js";
 
 // Los movimientos que nacen de una venta o de un abono (ventas_id) se corrigen
@@ -286,33 +290,48 @@ const registrar = async (
   { tipo, categoria, monto, descripcion, fecha, insumos, tipo_servicio, periodo_servicio },
 ) => {
   const tipoServicioFinal = categoria === "servicio_publico" ? (tipo_servicio ?? null) : null;
+
   let periodoServicioFinal = null;
+
   if (categoria === "servicio_publico") {
-    if (tipo !== "gasto") throw Object.assign(new Error("Un servicio público debe registrarse como gasto."), { status: 400 });
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(periodo_servicio ?? "")))
-      throw Object.assign(new Error("Selecciona el mes del recibo que vas a registrar."), { status: 400 });
-    const resumen = await resumenServicios(empresasId);
-    const servicio = resumen.servicios.find((s) => s.servicio === tipoServicioFinal);
-    const mes = servicio?.meses.find((m) => m.mes === periodo_servicio);
-    if (!mes) throw Object.assign(new Error("El mes seleccionado no está dentro del periodo de control."), { status: 400 });
-    if (mes.registrado)
-      throw Object.assign(new Error("Ese recibo ya aparece registrado. Actualiza la pantalla e intenta con otro mes."), { status: 409 });
+    if (tipo !== "gasto") {
+      throw Object.assign(new Error("Un servicio público debe registrarse como gasto."), { status: 400 });
+    }
+
+    await validarPeriodoControlado(empresasId, tipoServicioFinal, periodo_servicio);
+
     periodoServicioFinal = periodo_servicio;
   }
 
-  if (categoria === "insumo" && tipo !== "gasto")
+  if (categoria === "insumo" && tipo !== "gasto") {
     throw Object.assign(new Error("Las compras de insumos deben registrarse como gastos."), { status: 400 });
+  }
+
   const itemsCompra = categoria === "insumo" ? normalizarCompra(insumos, monto) : null;
-  if (itemsCompra)
+
+  if (itemsCompra) {
     await validarInsumos(
       prisma,
       empresasId,
       itemsCompra.map((i) => i.insumos_id),
     );
-  if (categoria !== "insumo" && insumos?.length)
+  }
+
+  if (categoria !== "insumo" && insumos?.length) {
     throw Object.assign(new Error("Solo los gastos de categoría insumo pueden incluir productos de inventario."), { status: 400 });
+  }
 
   return prisma.$transaction(async (tx) => {
+    if (categoria === "servicio_publico") {
+      await bloquearEmpresaServiciosPublicos(tx, empresasId);
+
+      await validarReciboUnico(tx, {
+        empresasId,
+        servicio: tipoServicioFinal,
+        periodo: periodoServicioFinal,
+      });
+    }
+
     const mov = await tx.movimientos_caja.create({
       data: {
         empresas_id: empresasId,
@@ -326,7 +345,11 @@ const registrar = async (
         fecha: fechaColombiaToUTC(fecha),
       },
     });
-    if (itemsCompra) await crearDetalleCompra(tx, mov, usuariosId, itemsCompra, fecha);
+
+    if (itemsCompra) {
+      await crearDetalleCompra(tx, mov, usuariosId, itemsCompra, fecha);
+    }
+
     return mov;
   });
 };
@@ -340,6 +363,35 @@ const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion,
     });
     if (!mov) throw noEncontrado("Movimiento no encontrado.");
     rechazarSiEsDeVenta(mov);
+
+    // Cualquier modificación de un recibo debe coordinarse con los registros
+    // nuevos para evitar duplicados concurrentes.
+    const requiereBloqueoServicios = mov.categoria === "servicio_publico" || categoria === "servicio_publico";
+
+    if (requiereBloqueoServicios) {
+      await bloquearEmpresaServiciosPublicos(tx, empresasId);
+    }
+
+    let periodoServicioFinal = null;
+
+    if (categoria === "servicio_publico") {
+      if (tipo !== "gasto") {
+        throw Object.assign(new Error("Un servicio público debe registrarse como gasto."), { status: 400 });
+      }
+
+      // Mantiene el periodo anterior si no se envía uno nuevo.
+      // Para registros históricos sin periodo, se utiliza el mes de su fecha.
+      periodoServicioFinal = periodo_servicio ?? mov.periodo_servicio ?? mov.fecha.toISOString().slice(0, 7);
+
+      await validarPeriodoControlado(empresasId, tipoServicioFinal, periodoServicioFinal);
+
+      await validarReciboUnico(tx, {
+        empresasId,
+        servicio: tipoServicioFinal,
+        periodo: periodoServicioFinal,
+        excluirMovimientoId: id,
+      });
+    }
 
     if (mov.compra_insumos) {
       if (tipo !== "gasto" || categoria !== "insumo") {
@@ -446,7 +498,7 @@ const actualizar = async (id, empresasId, { tipo, categoria, monto, descripcion,
         tipo,
         categoria,
         tipo_servicio: tipoServicioFinal,
-        periodo_servicio: categoria === "servicio_publico" ? (periodo_servicio ?? mov.periodo_servicio ?? null) : null,
+        periodo_servicio: periodoServicioFinal,
         monto,
         descripcion,
         fecha: fechaColombiaToUTC(fecha),
