@@ -5,7 +5,7 @@ import { authenticate, requireEmpresa } from "../../middlewares/auth.middleware.
 import { ok, created, notFound, badRequest, paginate } from "../../utils/response.js";
 import * as svc from "./productos.service.js";
 import { requireRol } from "../../middlewares/auth.middleware.js";
-import { uploadImagenProducto } from "../../middlewares/upload.middleware.js";
+import { uploadImagenProducto, guardarImagenProducto, eliminarImagenSubida } from "../../middlewares/upload.middleware.js";
 
 const router = Router();
 
@@ -105,20 +105,52 @@ router.put("/:id/receta", requireRol("admin"), async (req, res, next) => {
   }
 });
 
-// ── POST /productos/:id/imagen ────────────────────────────────────────
-// Sube (o reemplaza) la foto del producto, usada en la página pública.
-router.post("/:id/imagen", requireRol("admin"), uploadImagenProducto.single("imagen"), async (req, res, next) => {
+const verificarProductoParaImagen = async (req, res, next) => {
   try {
-    const producto = await svc.obtener(Number(req.params.id), req.empresas_id);
-    if (!producto) return notFound(res);
-    if (!req.file) return badRequest(res, "Debes adjuntar una imagen (campo 'imagen').");
+    const id = Number(req.params.id);
 
-    const imagen_url = `/uploads/productos/${req.file.filename}`;
-    const actualizado = await svc.actualizar(Number(req.params.id), req.empresas_id, { imagen_url });
-    return ok(res, actualizado);
+    if (!Number.isInteger(id) || id <= 0) {
+      return badRequest(res, "ID de producto inválido.");
+    }
+
+    const producto = await svc.obtener(id, req.empresas_id);
+
+    if (!producto) return notFound(res);
+
+    req.productoImagen = producto;
+    next();
   } catch (err) {
     next(err);
   }
-});
+};
+
+// ── POST /productos/:id/imagen ────────────────────────────────────────
+// Sube (o reemplaza) la foto del producto, usada en la página pública.
+router.post(
+  "/:id/imagen",
+  requireRol("admin"),
+  verificarProductoParaImagen,
+  uploadImagenProducto.single("imagen"),
+  guardarImagenProducto,
+  async (req, res, next) => {
+    try {
+      if (!req.file || !req.imagenProducto) {
+        return badRequest(res, "Debes adjuntar una imagen (campo 'imagen').");
+      }
+
+      const actualizado = await svc.actualizar(Number(req.params.id), req.empresas_id, { imagen_url: req.imagenProducto.url });
+
+      return ok(res, actualizado);
+    } catch (err) {
+      try {
+        await eliminarImagenSubida(req);
+      } catch (errorLimpieza) {
+        console.error("No se pudo eliminar la imagen rechazada:", errorLimpieza);
+      }
+
+      next(err);
+    }
+  },
+);
 
 export default router;
