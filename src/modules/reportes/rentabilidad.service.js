@@ -386,6 +386,7 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
         unidadesSnapshot: 0,
         unidadesSinSnapshot: 0,
         costoIncompleto: false,
+        snapshotIncompleto: false,
         nombre: v.productos.nombre,
         usa_energia: v.productos.usa_energia,
         usa_agua: v.productos.usa_agua,
@@ -397,6 +398,9 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
     if (v.costo_unitario != null) {
       acumuladoVentas[v.productos_id].costoSnapshot += Number(v.costo_unitario) * v.cantidad;
       acumuladoVentas[v.productos_id].unidadesSnapshot += v.cantidad;
+      if (["incompleto", "sin_costo_verificable"].includes(v.estado_costo)) {
+        acumuladoVentas[v.productos_id].snapshotIncompleto = true;
+      }
     } else {
       acumuladoVentas[v.productos_id].unidadesSinSnapshot += v.cantidad;
     }
@@ -416,17 +420,48 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
     .map((id) => {
       const venta = acumuladoVentas[id];
 
-      const costoFallback = directosPeriodo[id] ?? directosHistorico[id] ?? 0;
-      const costoDirectoTotal = venta.costoSnapshot + costoFallback * venta.unidadesSinSnapshot;
-      const costoDirectoUnit = venta.unidades > 0 ? costoDirectoTotal / venta.unidades : 0;
-      const costoDirectoEstimado = venta.unidadesSinSnapshot > 0 || venta.costoIncompleto;
+      const costoFallback = directosPeriodo[id] ?? directosHistorico[id] ?? null;
+      const costoDirectoCompleto = !venta.snapshotIncompleto && (venta.unidadesSinSnapshot === 0 || costoFallback != null);
+      const costoDirectoTotal = costoDirectoCompleto
+        ? venta.costoSnapshot + (costoFallback ?? 0) * venta.unidadesSinSnapshot
+        : null;
+      const costoDirectoUnit = costoDirectoCompleto && venta.unidades > 0
+        ? costoDirectoTotal / venta.unidades
+        : null;
+      const costoDirectoEstimado = costoDirectoCompleto && (venta.unidadesSinSnapshot > 0 || venta.costoIncompleto);
 
       const serviciosUsados = SERVICIOS.filter((s) => venta[`usa_${s}`]);
-      const indirectoUnit = serviciosUsados.reduce((sum, s) => sum + indirectos[s].costoUnitario, 0);
-      const indirectoEstimado = serviciosUsados.some((s) => indirectos[s].estimado);
 
-      const costoConVariableUnit = costoDirectoUnit + indirectoUnit;
-      const costoConVariableTotal = costoConVariableUnit * venta.unidades;
+      const indirectosCompletos = serviciosUsados.every((servicio) => {
+        const dato = indirectos[servicio];
+
+        return (
+          dato &&
+          dato.costoUnitario != null &&
+          Number.isFinite(Number(dato.costoUnitario)) &&
+          (dato.estimado === true || (Number(dato.unidades) > 0 && Number(dato.gasto) > 0))
+        );
+      });
+
+      const indirectoEstimado = serviciosUsados.some((s) => indirectos[s]?.estimado === true);
+      const indirectoUnit = indirectosCompletos
+        ? serviciosUsados.reduce((sum, s) => sum + Number(indirectos[s].costoUnitario), 0)
+        : null;
+
+      const costoConVariableCompleto = costoDirectoCompleto && indirectosCompletos;
+      const costoConVariableUnit = costoConVariableCompleto
+        ? costoDirectoUnit + indirectoUnit
+        : null;
+      const costoConVariableTotal = costoConVariableCompleto
+        ? costoConVariableUnit * venta.unidades
+        : null;
+
+      const utilidadDirecta = costoDirectoCompleto
+        ? venta.ingreso - costoDirectoTotal
+        : null;
+      const utilidadConVariable = costoConVariableCompleto
+        ? venta.ingreso - costoConVariableTotal
+        : null;
 
       return {
         productos_id: id,
@@ -436,16 +471,36 @@ const rentabilidad = async (empresasId, { periodo = "mes", desde, hasta } = {}) 
         costoDirectoUnitario: costoDirectoUnit,
         costoDirectoTotal,
         costoDirectoEstimado,
+        costoDirectoNoVerificable: !costoDirectoCompleto,
         costoConVariableUnitario: costoConVariableUnit,
         costoConVariableTotal,
+        costoConVariableEstimado: costoConVariableCompleto && (costoDirectoEstimado || indirectoEstimado),
+        costoConVariableNoVerificable: !costoConVariableCompleto,
         indirectoEstimado,
-        utilidadDirecta: venta.ingreso - costoDirectoTotal,
-        utilidadConVariable: venta.ingreso - costoConVariableTotal,
-        margenDirecto: venta.ingreso > 0 ? (venta.ingreso - costoDirectoTotal) / venta.ingreso : 0,
-        margenConVariable: venta.ingreso > 0 ? (venta.ingreso - costoConVariableTotal) / venta.ingreso : 0,
+        utilidadDirecta,
+        utilidadConVariable,
+        margenDirecto: costoDirectoCompleto
+          ? venta.ingreso > 0 ? utilidadDirecta / venta.ingreso : 0
+          : null,
+        margenConVariable: costoConVariableCompleto
+          ? venta.ingreso > 0 ? utilidadConVariable / venta.ingreso : 0
+          : null,
       };
     })
-    .sort((a, b) => b.utilidadConVariable - a.utilidadConVariable);
+    .sort((a, b) => {
+      const aVerificable = a.utilidadConVariable != null;
+      const bVerificable = b.utilidadConVariable != null;
+
+      if (aVerificable !== bVerificable) {
+        return aVerificable ? -1 : 1;
+      }
+
+      if (!aVerificable) {
+        return a.nombre.localeCompare(b.nombre);
+      }
+
+      return b.utilidadConVariable - a.utilidadConVariable;
+    });
 
   return { indirectos, productos, consumoPropio };
 };
