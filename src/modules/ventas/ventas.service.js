@@ -435,6 +435,13 @@ const actualizar = async (id, empresasId, usuariosId, { canal, valor_domicilio, 
   return prisma.$transaction(async (tx) => {
     validarItemsVenta(itemsEntrada);
     validarCanal(canal);
+    await tx.$queryRaw`
+      SELECT id
+      FROM ventas
+      WHERE id = ${id}
+        AND empresas_id = ${empresasId}
+      FOR UPDATE
+    `;
     const venta = await tx.ventas.findFirst({
       where: { id, empresas_id: empresasId, anulada: false },
       include: { ventas_items: true, pagos_venta: true },
@@ -636,6 +643,13 @@ const recalcularCostoHistoricoVenta = async (id, empresasId) => {
 
 const anular = async (id, empresasId, usuariosId, motivo) => {
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT id
+      FROM ventas
+      WHERE id = ${id}
+        AND empresas_id = ${empresasId}
+      FOR UPDATE
+    `;
     const venta = await tx.ventas.findFirst({
       where: { id, empresas_id: empresasId, anulada: false },
       include: { ventas_items: true },

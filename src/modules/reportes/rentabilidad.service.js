@@ -198,17 +198,35 @@ const costoDirectoPorProducto = async (empresasId, productosIds, rangoFecha) => 
   });
 
   const acumulado = {};
+
   for (const it of items) {
-    if (!acumulado[it.productos_id]) acumulado[it.productos_id] = { costoTotal: 0, unidades: 0 };
-    acumulado[it.productos_id].costoTotal += Number(it.costo_unitario) * it.cantidad;
-    acumulado[it.productos_id].unidades += it.cantidad;
+    if (!acumulado[it.productos_id]) {
+      acumulado[it.productos_id] = {
+        costoTotal: 0,
+        unidades: 0,
+        incompleto: false,
+      };
+    }
+
+    const producto = acumulado[it.productos_id];
+
+    if (it.costo_unitario == null) {
+      producto.incompleto = true;
+      continue;
+    }
+
+    producto.costoTotal += Number(it.costo_unitario) * Number(it.cantidad);
+    producto.unidades += Number(it.cantidad);
   }
 
   const resultado = {};
+
   for (const id of productosIds) {
-    const a = acumulado[id];
-    resultado[id] = a && a.unidades > 0 ? a.costoTotal / a.unidades : null;
+    const producto = acumulado[id];
+
+    resultado[id] = producto && !producto.incompleto && producto.unidades > 0 ? producto.costoTotal / producto.unidades : null;
   }
+
   return resultado;
 };
 
@@ -228,27 +246,100 @@ const consumoPropioPeriodo = async (empresasId, rangoFecha, indirectos) => {
       productos_id: true,
       cantidad: true,
       costo_unitario: true,
-      productos: { select: { usa_energia: true, usa_agua: true, usa_gas: true } },
+      estado_costo: true,
+      productos: {
+        select: {
+          usa_energia: true,
+          usa_agua: true,
+          usa_gas: true,
+        },
+      },
     },
   });
-  if (items.length === 0) return { unidades: 0, costoDirecto: 0, costoConVariable: 0 };
+
+  if (items.length === 0) {
+    return {
+      unidades: 0,
+      costoDirecto: 0,
+      costoConVariable: 0,
+      estimado: false,
+      noVerificable: false,
+    };
+  }
 
   const ids = [...new Set(items.map((i) => i.productos_id))];
   const dPeriodo = await costoDirectoPorProducto(empresasId, ids, rangoFecha);
   const faltan = ids.filter((id) => dPeriodo[id] == null);
   const dHistorico = faltan.length ? await costoDirectoPorProducto(empresasId, faltan, undefined) : {};
 
-  let unidades = 0,
-    costoDirecto = 0,
-    costoConVariable = 0;
+  let unidades = 0;
+  let costoDirecto = 0;
+  let costoConVariable = 0;
+  let costoDirectoCompleto = true;
+  let costoConVariableCompleto = true;
+  let estimado = false;
+
   for (const it of items) {
-    const directo = it.costo_unitario != null ? Number(it.costo_unitario) : (dPeriodo[it.productos_id] ?? dHistorico[it.productos_id] ?? 0);
-    const indirecto = SERVICIOS.filter((s) => it.productos[`usa_${s}`]).reduce((sum, s) => sum + indirectos[s].costoUnitario, 0);
-    unidades += it.cantidad;
-    costoDirecto += directo * it.cantidad;
-    costoConVariable += (directo + indirecto) * it.cantidad;
+    const tieneSnapshot = it.costo_unitario != null;
+
+    const directo = tieneSnapshot ? Number(it.costo_unitario) : (dPeriodo[it.productos_id] ?? dHistorico[it.productos_id] ?? null);
+
+    if (!tieneSnapshot && directo != null) {
+      estimado = true;
+    }
+
+    if (["incompleto", "sin_costo_verificable"].includes(it.estado_costo)) {
+      estimado = true;
+    }
+
+    let indirecto = 0;
+    let indirectosCompletos = true;
+
+    const serviciosUsados = SERVICIOS.filter((servicio) => it.productos[`usa_${servicio}`]);
+
+    for (const servicio of serviciosUsados) {
+      const dato = indirectos[servicio];
+
+      const verificable =
+        dato &&
+        Number.isFinite(Number(dato.costoUnitario)) &&
+        (dato.estimado === true || (Number(dato.unidades) > 0 && Number(dato.gasto) > 0));
+
+      if (!verificable) {
+        indirectosCompletos = false;
+        continue;
+      }
+
+      indirecto += Number(dato.costoUnitario);
+
+      if (dato.estimado) {
+        estimado = true;
+      }
+    }
+
+    unidades += Number(it.cantidad);
+
+    if (directo == null) {
+      costoDirectoCompleto = false;
+      costoConVariableCompleto = false;
+    } else {
+      costoDirecto += directo * Number(it.cantidad);
+    }
+
+    if (!indirectosCompletos) {
+      costoConVariableCompleto = false;
+    } else if (directo != null) {
+      costoConVariable += (directo + indirecto) * Number(it.cantidad);
+    }
   }
-  return { unidades, costoDirecto, costoConVariable };
+
+  return {
+    unidades,
+    costoDirecto: costoDirectoCompleto ? costoDirecto : null,
+    costoConVariable: costoConVariableCompleto ? costoConVariable : null,
+    estimado,
+    noVerificable: !costoConVariableCompleto,
+  };
 };
 
 // ── Rentabilidad por producto ───────────────────────────────────────────

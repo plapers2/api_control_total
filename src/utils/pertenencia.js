@@ -30,9 +30,24 @@ const validarInsumos = async (db, empresasId, ids) => {
 
 const validarCliente = async (db, empresasId, id) => {
   if (id == null) return;
+
   const [clienteId] = idsUnicos([id]);
-  const n = await db.clientes.count({ where: { id: clienteId, empresas_id: empresasId } });
-  if (!n) throw badRequest("El cliente no existe en tu empresa.");
+
+  await db.$queryRaw`
+    SELECT id
+    FROM clientes
+    WHERE id = ${clienteId}
+      AND empresas_id = ${empresasId}
+    FOR UPDATE
+  `;
+
+  const cliente = await db.clientes.findFirst({
+    where: { id: clienteId, empresas_id: empresasId },
+    select: { id: true, activo: true },
+  });
+
+  if (!cliente) throw badRequest("El cliente no existe en tu empresa.");
+  if (!cliente.activo) throw badRequest("No puedes registrar una venta a un cliente inactivo.");
 };
 
 export { validarProductos, validarInsumos, validarCliente };

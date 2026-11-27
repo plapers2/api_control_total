@@ -13,28 +13,79 @@ const obtener = async (id, empresasId) => prisma.clientes.findFirst({ where: { i
 
 const crear = async (empresasId, data) => prisma.clientes.create({ data: { ...data, empresas_id: empresasId } });
 
+const validarDesactivacionCliente = async (tx, id, empresasId) => {
+  await tx.$queryRaw`
+    SELECT id
+    FROM clientes
+    WHERE id = ${id}
+      AND empresas_id = ${empresasId}
+    FOR UPDATE
+  `;
+
+  const cliente = await tx.clientes.findFirst({
+    where: { id, empresas_id: empresasId },
+    select: { id: true, saldo_favor: true },
+  });
+
+  if (!cliente) throw noEncontrado("Cliente no encontrado.");
+
+  if (Number(cliente.saldo_favor) > 0) {
+    throw Object.assign(new Error("El cliente tiene saldo a favor. Devuélvelo o úsalo antes de desactivarlo."), { status: 400 });
+  }
+
+  const deudas = await tx.ventas.count({
+    where: {
+      clientes_id: id,
+      empresas_id: empresasId,
+      anulada: false,
+      estado_pago: { in: ["pendiente", "parcial"] },
+    },
+  });
+
+  if (deudas > 0) {
+    throw Object.assign(new Error("El cliente tiene deudas pendientes. Cóbralas antes de desactivarlo."), { status: 400 });
+  }
+};
+
 const actualizar = async (id, empresasId, data) => {
+  if (data.activo === false) {
+    return prisma.$transaction(async (tx) => {
+      await validarDesactivacionCliente(tx, id, empresasId);
+
+      const { count } = await tx.clientes.updateMany({
+        where: { id, empresas_id: empresasId },
+        data,
+      });
+
+      if (count === 0) throw noEncontrado("Cliente no encontrado.");
+
+      return tx.clientes.findFirst({
+        where: { id, empresas_id: empresasId },
+      });
+    });
+  }
+
   const { count } = await prisma.clientes.updateMany({
     where: { id, empresas_id: empresasId },
     data,
   });
+
   if (count === 0) throw noEncontrado("Cliente no encontrado.");
-  return prisma.clientes.findFirst({ where: { id, empresas_id: empresasId } });
+
+  return prisma.clientes.findFirst({
+    where: { id, empresas_id: empresasId },
+  });
 };
 
 const eliminar = async (id, empresasId) => {
-  const cliente = await prisma.clientes.findFirst({ where: { id, empresas_id: empresasId } });
-  if (!cliente) throw noEncontrado("Cliente no encontrado.");
+  return prisma.$transaction(async (tx) => {
+    await validarDesactivacionCliente(tx, id, empresasId);
 
-  if (Number(cliente.saldo_favor) > 0)
-    throw Object.assign(new Error("El cliente tiene saldo a favor. Devuélvelo o úsalo antes de desactivarlo."), { status: 400 });
-
-  const deudas = await prisma.ventas.count({
-    where: { clientes_id: id, empresas_id: empresasId, anulada: false, estado_pago: { in: ["pendiente", "parcial"] } },
+    await tx.clientes.update({
+      where: { id },
+      data: { activo: false },
+    });
   });
-  if (deudas > 0) throw Object.assign(new Error("El cliente tiene deudas pendientes. Cóbralas antes de desactivarlo."), { status: 400 });
-
-  await prisma.clientes.update({ where: { id }, data: { activo: false } });
 };
 
 // Clientes activos con más de `dias` días sin comprar (o que nunca han comprado).

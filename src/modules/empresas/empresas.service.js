@@ -65,47 +65,85 @@ const agregarMiembro = async (empresasId, { usuarios_id, roles_id }, usuarioActu
     throw Object.assign(new Error("El rol indicado no es válido."), { status: 400 });
   }
 
-  const [usuario, rol] = await Promise.all([
-    prisma.usuarios.findUnique({
-      where: { id: usuarioId },
-      select: { id: true, activo: true },
-    }),
-    prisma.roles.findUnique({
-      where: { id: rolId },
-      select: { id: true, nombre: true },
-    }),
-  ]);
+  return prisma.$transaction(async (tx) => {
+    const empresa = await tx.$queryRaw`
+      SELECT id
+      FROM empresas
+      WHERE id = ${empresasId}
+      FOR UPDATE
+    `;
 
-  if (!usuario || !usuario.activo) {
-    throw Object.assign(new Error("El usuario no existe o está inactivo."), { status: 400 });
-  }
+    if (!empresa.length) {
+      throw Object.assign(new Error("Empresa no encontrada."), { status: 404 });
+    }
 
-  if (!rol || !["admin", "empleado"].includes(rol.nombre)) {
-    throw Object.assign(new Error("El rol indicado no es válido."), { status: 400 });
-  }
+    const [usuario, rol] = await Promise.all([
+      tx.usuarios.findUnique({
+        where: { id: usuarioId },
+        select: { id: true, activo: true },
+      }),
+      tx.roles.findUnique({
+        where: { id: rolId },
+        select: { id: true, nombre: true },
+      }),
+    ]);
 
-  // El administrador no puede quitarse su propio rol de administrador.
-  if (usuarioId === usuarioActualId && rol.nombre !== "admin") {
-    throw Object.assign(new Error("No puedes quitarte tu propio rol de administrador."), { status: 400 });
-  }
+    if (!usuario || !usuario.activo) {
+      throw Object.assign(new Error("El usuario no existe o está inactivo."), { status: 400 });
+    }
 
-  return prisma.usuarios_empresas.upsert({
-    where: {
-      usuarios_id_empresas_id: {
+    if (!rol || !["admin", "empleado"].includes(rol.nombre)) {
+      throw Object.assign(new Error("El rol indicado no es válido."), { status: 400 });
+    }
+
+    if (usuarioId === usuarioActualId && rol.nombre !== "admin") {
+      throw Object.assign(new Error("No puedes quitarte tu propio rol de administrador."), { status: 400 });
+    }
+
+    const membresiaActual = await tx.usuarios_empresas.findUnique({
+      where: {
+        usuarios_id_empresas_id: {
+          usuarios_id: usuarioId,
+          empresas_id: empresasId,
+        },
+      },
+      include: { roles: true },
+    });
+
+    // Impedir degradar al último administrador activo.
+    if (membresiaActual?.activo && membresiaActual.roles?.nombre === "admin" && rol.nombre !== "admin") {
+      const administradoresActivos = await tx.usuarios_empresas.count({
+        where: {
+          empresas_id: empresasId,
+          activo: true,
+          roles: { is: { nombre: "admin" } },
+          usuarios: { is: { activo: true } },
+        },
+      });
+
+      if (administradoresActivos <= 1) {
+        throw Object.assign(new Error("La empresa debe conservar al menos un administrador activo."), { status: 400 });
+      }
+    }
+
+    return tx.usuarios_empresas.upsert({
+      where: {
+        usuarios_id_empresas_id: {
+          usuarios_id: usuarioId,
+          empresas_id: empresasId,
+        },
+      },
+      create: {
         usuarios_id: usuarioId,
         empresas_id: empresasId,
+        roles_id: rol.id,
+        activo: true,
       },
-    },
-    create: {
-      usuarios_id: usuarioId,
-      empresas_id: empresasId,
-      roles_id: rol.id,
-      activo: true,
-    },
-    update: {
-      roles_id: rol.id,
-      activo: true,
-    },
+      update: {
+        roles_id: rol.id,
+        activo: true,
+      },
+    });
   });
 };
 
@@ -115,11 +153,57 @@ const removerMiembro = async (empresasId, usuariosId, usuarioActualId) => {
   if (usuariosId === usuarioActualId) {
     throw Object.assign(new Error("No puedes quitarte a ti mismo de la empresa."), { status: 400 });
   }
-  return prisma.usuarios_empresas.update({
-    where: {
-      usuarios_id_empresas_id: { usuarios_id: usuariosId, empresas_id: empresasId },
-    },
-    data: { activo: false },
+
+  return prisma.$transaction(async (tx) => {
+    const empresa = await tx.$queryRaw`
+      SELECT id
+      FROM empresas
+      WHERE id = ${empresasId}
+      FOR UPDATE
+    `;
+
+    if (!empresa.length) {
+      throw Object.assign(new Error("Empresa no encontrada."), { status: 404 });
+    }
+
+    const membresia = await tx.usuarios_empresas.findUnique({
+      where: {
+        usuarios_id_empresas_id: {
+          usuarios_id: usuariosId,
+          empresas_id: empresasId,
+        },
+      },
+      include: {
+        roles: true,
+        usuarios: { select: { activo: true } },
+      },
+    });
+
+    // Comprobar si se está intentando desactivar al último administrador activo.
+    if (membresia?.activo && membresia.roles?.nombre === "admin" && membresia.usuarios?.activo) {
+      const administradoresActivos = await tx.usuarios_empresas.count({
+        where: {
+          empresas_id: empresasId,
+          activo: true,
+          roles: { is: { nombre: "admin" } },
+          usuarios: { is: { activo: true } },
+        },
+      });
+
+      if (administradoresActivos <= 1) {
+        throw Object.assign(new Error("La empresa debe conservar al menos un administrador activo."), { status: 400 });
+      }
+    }
+
+    return tx.usuarios_empresas.update({
+      where: {
+        usuarios_id_empresas_id: {
+          usuarios_id: usuariosId,
+          empresas_id: empresasId,
+        },
+      },
+      data: { activo: false },
+    });
   });
 };
 

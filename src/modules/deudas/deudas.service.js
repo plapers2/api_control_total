@@ -58,6 +58,14 @@ const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fec
   if (!Number.isFinite(monto) || monto <= 0) throw badRequest("El monto del abono debe ser mayor a 0.");
 
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT id
+      FROM ventas
+      WHERE id = ${ventaId}
+        AND empresas_id = ${empresasId}
+      FOR UPDATE
+    `;
+
     const venta = await tx.ventas.findFirst({
       where: { id: ventaId, empresas_id: empresasId },
       include: { pagos_venta: true },
@@ -101,7 +109,14 @@ const registrarPago = async (ventaId, empresasId, usuariosId, { monto, nota, fec
         fecha: fechaColombiaToUTC(fecha),
       },
     });
-    await registrarRecuperacionVenta(tx, { empresasId, ventaId, montoCobrado: monto, fecha: fechaColombiaToUTC(fecha), pagoVentaId: pago.id, origen: "abono" });
+    await registrarRecuperacionVenta(tx, {
+      empresasId,
+      ventaId,
+      montoCobrado: monto,
+      fecha: fechaColombiaToUTC(fecha),
+      pagoVentaId: pago.id,
+      origen: "abono",
+    });
 
     return pago;
   });
@@ -191,6 +206,30 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
   if (!Number.isFinite(monto) || monto <= 0) throw badRequest("El monto del abono debe ser mayor a 0.");
 
   return prisma.$transaction(async (tx) => {
+    if (clientesId > 0) {
+      await tx.$queryRaw`
+        SELECT id
+        FROM ventas
+        WHERE empresas_id = ${empresasId}
+          AND clientes_id = ${clientesId}
+          AND anulada = false
+          AND estado_pago IN ('pendiente', 'parcial')
+        ORDER BY fecha ASC, created_at ASC, id ASC
+        FOR UPDATE
+      `;
+    } else {
+      await tx.$queryRaw`
+        SELECT id
+        FROM ventas
+        WHERE empresas_id = ${empresasId}
+          AND clientes_id IS NULL
+          AND anulada = false
+          AND estado_pago IN ('pendiente', 'parcial')
+        ORDER BY fecha ASC, created_at ASC, id ASC
+        FOR UPDATE
+      `;
+    }
+
     const pendientes = (await ventasPendientesCliente(tx, empresasId, clientesId))
       .map((v) => ({ venta: v, saldo: saldoCentavos(v) }))
       .filter((x) => x.saldo > 0);
@@ -236,7 +275,15 @@ const registrarPagoCliente = async (clientesId, empresasId, usuariosId, { monto,
           fecha: fechaColombiaToUTC(fecha),
         },
       });
-      await registrarRecuperacionVenta(tx, { empresasId, ventaId: venta.id, montoCobrado: montoVenta, fecha: fechaColombiaToUTC(fecha), pagoVentaId: pago.id, origen: "abono", recalcular: false });
+      await registrarRecuperacionVenta(tx, {
+        empresasId,
+        ventaId: venta.id,
+        montoCobrado: montoVenta,
+        fecha: fechaColombiaToUTC(fecha),
+        pagoVentaId: pago.id,
+        origen: "abono",
+        recalcular: false,
+      });
 
       aplicados.push({
         ventas_id: venta.id,

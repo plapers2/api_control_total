@@ -148,23 +148,57 @@ const listarMiembros = async (empresasId) =>
   });
 
 // ── Desactivar miembro (sin borrar el usuario global) ────────────────
+
 const desactivarMiembro = async (usuariosEmpresasId, empresasId, usuarioActualId) => {
-  if (!Number.isInteger(usuariosEmpresasId) || usuariosEmpresasId <= 0) throw noEncontrado("Miembro no encontrado.");
-
-  const membresia = await prisma.usuarios_empresas.findFirst({
-    where: { id: usuariosEmpresasId, empresas_id: empresasId, activo: true },
-  });
-  if (!membresia) throw noEncontrado("Miembro no encontrado.");
-
-  // Quien desactiva es admin de esta empresa: mientras no pueda desactivarse a
-  // sí mismo, la empresa siempre conserva al menos un administrador.
-  if (membresia.usuarios_id === usuarioActualId) {
-    throw Object.assign(new Error("No puedes desactivarte a ti mismo."), { status: 400 });
+  if (!Number.isInteger(usuariosEmpresasId) || usuariosEmpresasId <= 0) {
+    throw noEncontrado("Miembro no encontrado.");
   }
 
-  return prisma.usuarios_empresas.update({
-    where: { id: membresia.id },
-    data: { activo: false },
+  return prisma.$transaction(async (tx) => {
+    // Serializa las desactivaciones dentro de la misma empresa.
+    await tx.$queryRaw`
+      SELECT id
+      FROM empresas
+      WHERE id = ${empresasId}
+      FOR UPDATE
+    `;
+
+    const membresia = await tx.usuarios_empresas.findFirst({
+      where: {
+        id: usuariosEmpresasId,
+        empresas_id: empresasId,
+        activo: true,
+      },
+      include: { roles: true },
+    });
+
+    if (!membresia) {
+      throw noEncontrado("Miembro no encontrado.");
+    }
+
+    if (membresia.usuarios_id === usuarioActualId) {
+      throw Object.assign(new Error("No puedes desactivarte a ti mismo."), { status: 400 });
+    }
+
+    if (membresia.roles?.nombre === "admin") {
+      const administradoresActivos = await tx.usuarios_empresas.count({
+        where: {
+          empresas_id: empresasId,
+          activo: true,
+          roles: { is: { nombre: "admin" } },
+          usuarios: { is: { activo: true } },
+        },
+      });
+
+      if (administradoresActivos <= 1) {
+        throw Object.assign(new Error("No puedes desactivar al último administrador de la empresa."), { status: 400 });
+      }
+    }
+
+    return tx.usuarios_empresas.update({
+      where: { id: membresia.id },
+      data: { activo: false },
+    });
   });
 };
 

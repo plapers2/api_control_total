@@ -622,6 +622,14 @@ const actualizar = async (id, empresasId, usuariosId, datos = {}) => {
 
     const item = validarItemsLote(items);
 
+    await tx.$queryRaw`
+      SELECT id
+      FROM lotes_produccion
+      WHERE id = ${id}
+        AND empresas_id = ${empresasId}
+      FOR UPDATE
+    `;
+
     const lote = await tx.lotes_produccion.findFirst({
       where: {
         id,
@@ -848,6 +856,13 @@ const actualizar = async (id, empresasId, usuariosId, datos = {}) => {
 
 const anular = async (id, empresasId, motivo) => {
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT id
+      FROM lotes_produccion
+      WHERE id = ${id}
+        AND empresas_id = ${empresasId}
+      FOR UPDATE
+    `;
     const lote = await tx.lotes_produccion.findFirst({
       where: {
         id,
