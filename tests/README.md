@@ -98,3 +98,18 @@ Los casos de inventario verifican que una base conciliada no pueda alterarse med
 Los casos de producción verifican consumos reales frente a receta, agregación de consumos repetidos del mismo insumo, aceptación de cantidades cero sin movimiento y rechazo de cantidades con más de tres decimales, consumos totalmente en cero, insumos de otra empresa o cantidades superiores al stock. También comprueban que el rechazo no cree lotes ni mueva inventario.
 
 En ciclos válidos se comparan stock de producto e insumo, salidas históricas, costo total y unitario, costo promedio del producto y snapshots de ediciones. La edición sustituye el consumo activo sin borrar su historial; una edición rechazada por falta de insumo debe revertir todos los cambios intermedios; la anulación restaura el inventario y cambia el estado del costo histórico. Para productos sin receta, se comprueba que se use el costo manual y que `insumos_reales` no provoque consumos. Todos los escenarios usan recursos temporales de la empresa de pruebas.
+
+
+## Exactitud de reportes y filtros de fecha
+
+La suite crea fixtures financieros dedicados para contrastar la rentabilidad con importes conocidos: ingreso, costo directo por snapshots de producción, costo indirecto de agua por unidad y utilidad/márgenes. Compara el reporte antes y después para verificar que el gasto del servicio y las unidades producidas se acumulen solo para productos que usan ese servicio.
+
+También comprueba el prorrateo de una factura mensual dentro de un rango de un solo día colombiano, que una venta de hoy no aparezca en el día anterior, y que los registros anulados no alteren la rentabilidad ni la fecha del primer registro de ventas, Caja o producción. Se valida que el módulo desconocido de primer registro use el consolidado y que tanto rentabilidad como primer registro respeten la empresa del token; el catálogo público debe respetar `PUBLIC_EMPRESA_ID`.
+
+Los fixtures se crean en las dos empresas temporales de la ejecución y la limpieza existente elimina ventas, pagos, movimientos de Caja, lotes e ítems antes de retirar las empresas.
+
+## Rangos de fechas calendario
+
+Los filtros compartidos de Ventas, Caja, Producción y Rentabilidad consultan columnas MariaDB `DATE` (`@db.Date`). Por eso, los límites se construyen con la fecha calendario de Colombia y se anclan ambos a medianoche de Colombia (`05:00 UTC`) del día indicado. No se debe utilizar `finDiaColombiaToUTC()` como límite superior para estas columnas: su `04:59 UTC` corresponde al día siguiente y el adaptador puede normalizar ese valor a la fecha siguiente, incorporando registros de mañana en el rango de hoy/ayer.
+
+La prueba de reportes verifica que una venta, un movimiento de Caja y un lote de Producción fechados hoy aparecen al consultar hoy y quedan excluidos al consultar ayer. También contrasta el resumen de Caja y el prorrateo de servicios públicos con rangos personalizados y `periodo=dia`.

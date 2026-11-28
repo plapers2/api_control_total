@@ -2869,7 +2869,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(eliminarCliente, 200, "DELETE /api/clientes/:id");
     });
 
-    await testConDiagnostico(t, "Caja, reportes y catálogo público: consultas finales", async () => {
+    await testConDiagnostico(t, "Caja, reportes y catálogo público: consultas finales", async (tReportes) => {
       const cajaLista = await request("GET", "/api/caja?periodo=total&page=1&limit=50", {
         routeKey: "/api/caja",
         token: adminToken,
@@ -2894,6 +2894,467 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(rentabilidad, 200, "GET /api/reportes/rentabilidad");
 
+      await testConDiagnostico(tReportes, "Reportes: rentabilidad exacta, prorrateo, fechas, anulaciones y aislamiento empresarial", async () => {
+        const fechaReporteDb = new Date(`${FECHA_COLOMBIA}T05:00:00.000Z`);
+        const fechaAnuladaDb = new Date("2020-01-01T05:00:00.000Z");
+        const fechaLocalAyer = new Date(`${FECHA_COLOMBIA}T12:00:00-05:00`);
+        fechaLocalAyer.setDate(fechaLocalAyer.getDate() - 1);
+        const ayer = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/Bogota",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(fechaLocalAyer);
+        const baselineTotalResponse = await request("GET", "/api/reportes/rentabilidad?periodo=total", {
+          routeKey: "/api/reportes/rentabilidad",
+          token: adminToken,
+        });
+        assertHttp(baselineTotalResponse, 200, "Reporte total antes de fixtures controlados");
+        const baselineTotal = baselineTotalResponse.json?.data;
+        assert.ok(baselineTotal?.indirectos?.agua, "El reporte debe exponer el costo indirecto de agua.");
+
+        const baselineDiaResponse = await request(
+          "GET",
+          `/api/reportes/rentabilidad?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}`,
+          { routeKey: "/api/reportes/rentabilidad", token: adminToken },
+        );
+        assertHttp(baselineDiaResponse, 200, "Reporte del día antes de fixtures controlados");
+        const baselineDia = baselineDiaResponse.json?.data;
+
+        const baselineCajaHoyResponse = await request(
+          "GET",
+          `/api/caja/resumen?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}`,
+          { routeKey: "/api/caja/resumen", token: adminToken },
+        );
+        assertHttp(baselineCajaHoyResponse, 200, "Balance de Caja de hoy antes de fixtures");
+        const baselineCajaHoy = baselineCajaHoyResponse.json?.data;
+
+        const baselineCajaAyerResponse = await request(
+          "GET",
+          `/api/caja/resumen?desde=${ayer}&hasta=${ayer}`,
+          { routeKey: "/api/caja/resumen", token: adminToken },
+        );
+        assertHttp(baselineCajaAyerResponse, 200, "Balance de Caja de ayer antes de fixtures");
+        const baselineCajaAyer = baselineCajaAyerResponse.json?.data;
+
+        // Producto dedicado al reporte: no reutiliza productos de los demás escenarios.
+        const productoReporte = await prisma.productos.create({
+          data: {
+            empresas_id: empresaId,
+            nombre: `Producto Reporte ${entorno.runId}`,
+            precio_venta: 10,
+            stock_actual: 8,
+            costo_promedio: 2.5,
+            costo_promedio_estado: "historico_calculado",
+            usa_energia: false,
+            usa_agua: true,
+            usa_gas: false,
+            activo: true,
+          },
+        });
+
+        const loteReporte = await prisma.lotes_produccion.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            fecha: fechaReporteDb,
+            notas: `Lote dedicado a reporte ${entorno.runId}`,
+            costo_total: 25,
+            anulado: false,
+          },
+        });
+        await prisma.lotes_produccion_items.create({
+          data: {
+            lotes_produccion_id: loteReporte.id,
+            productos_id: productoReporte.id,
+            cantidad: 10,
+            costo_unitario: 2.5,
+          },
+        });
+
+        const ventaReporte = await prisma.ventas.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            canal: "punto_venta",
+            total: 20,
+            estado_pago: "pagada",
+            fecha: fechaReporteDb,
+            anulada: false,
+            notas: `Venta dedicada a reporte ${entorno.runId}`,
+          },
+        });
+        await prisma.ventas_items.create({
+          data: {
+            ventas_id: ventaReporte.id,
+            productos_id: productoReporte.id,
+            cantidad: 2,
+            precio_unitario: 10,
+            subtotal: 20,
+            costo_unitario: 2.5,
+            estado_costo: "verificado",
+          },
+        });
+        await prisma.pagos_venta.create({
+          data: {
+            ventas_id: ventaReporte.id,
+            usuarios_id: admin.id,
+            monto: 20,
+            fecha: fechaReporteDb,
+            nota: `Pago de venta reporte ${entorno.runId}`,
+          },
+        });
+        const ingresoCajaReporte = await prisma.movimientos_caja.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            ventas_id: ventaReporte.id,
+            tipo: "ingreso",
+            categoria: "venta",
+            monto: 20,
+            descripcion: `Ingreso de venta reporte ${entorno.runId}`,
+            fecha: fechaReporteDb,
+          },
+        });
+        const facturaAguaReporte = await prisma.movimientos_caja.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            tipo: "gasto",
+            categoria: "servicio_publico",
+            tipo_servicio: "agua",
+            periodo_servicio: PERIODO_COLOMBIA,
+            monto: 90,
+            descripcion: `Factura de agua reporte ${entorno.runId}`,
+            fecha: fechaReporteDb,
+            anulado: false,
+          },
+        });
+
+        // Datos anulados anteriores: nunca deben contaminar rentabilidad ni primerRegistro.
+        const ventaAnuladaReporte = await prisma.ventas.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            canal: "punto_venta",
+            total: 1000,
+            estado_pago: "pagada",
+            fecha: fechaAnuladaDb,
+            anulada: true,
+            motivo_anulacion: "Fixture anulado de reporte",
+          },
+        });
+        await prisma.ventas_items.create({
+          data: {
+            ventas_id: ventaAnuladaReporte.id,
+            productos_id: productoReporte.id,
+            cantidad: 50,
+            precio_unitario: 20,
+            subtotal: 1000,
+            costo_unitario: 2.5,
+            estado_costo: "verificado",
+          },
+        });
+        await prisma.movimientos_caja.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            tipo: "ingreso",
+            categoria: "venta",
+            monto: 1000,
+            descripcion: `Movimiento anulado reporte ${entorno.runId}`,
+            fecha: fechaAnuladaDb,
+            anulado: true,
+          },
+        });
+        const loteAnuladoReporte = await prisma.lotes_produccion.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            fecha: fechaAnuladaDb,
+            notas: `Lote anulado reporte ${entorno.runId}`,
+            costo_total: 99,
+            anulado: true,
+          },
+        });
+        await prisma.lotes_produccion_items.create({
+          data: {
+            lotes_produccion_id: loteAnuladoReporte.id,
+            productos_id: productoReporte.id,
+            cantidad: 99,
+            costo_unitario: 1,
+          },
+        });
+
+        // En la empresa secundaria se registra una venta independiente para demostrar el aislamiento.
+        const ventaSecundariaReporte = await prisma.ventas.create({
+          data: {
+            empresas_id: empresaSecundariaId,
+            usuarios_id: admin.id,
+            canal: "punto_venta",
+            total: 14,
+            estado_pago: "pagada",
+            fecha: fechaReporteDb,
+            anulada: false,
+            notas: `Venta secundaria de reporte ${entorno.runId}`,
+          },
+        });
+        await prisma.ventas_items.create({
+          data: {
+            ventas_id: ventaSecundariaReporte.id,
+            productos_id: productoAjenoId,
+            cantidad: 2,
+            precio_unitario: 7,
+            subtotal: 14,
+            costo_unitario: 3,
+            estado_costo: "verificado",
+          },
+        });
+        await prisma.pagos_venta.create({
+          data: {
+            ventas_id: ventaSecundariaReporte.id,
+            usuarios_id: admin.id,
+            monto: 14,
+            fecha: fechaReporteDb,
+            nota: `Pago secundario reporte ${entorno.runId}`,
+          },
+        });
+        await prisma.movimientos_caja.create({
+          data: {
+            empresas_id: empresaSecundariaId,
+            usuarios_id: admin.id,
+            ventas_id: ventaSecundariaReporte.id,
+            tipo: "ingreso",
+            categoria: "venta",
+            monto: 14,
+            descripcion: `Ingreso secundario reporte ${entorno.runId}`,
+            fecha: fechaReporteDb,
+          },
+        });
+
+        const totalResponse = await request("GET", "/api/reportes/rentabilidad?periodo=total", {
+          routeKey: "/api/reportes/rentabilidad",
+          token: adminToken,
+        });
+        assertHttp(totalResponse, 200, "Reporte total con fixtures controlados");
+        const total = totalResponse.json?.data;
+        const productoTotal = total?.productos?.find((item) => item.productos_id === productoReporte.id);
+        assert.ok(productoTotal, "El reporte debe incluir el producto vendido en la empresa actual.");
+        assert.equal(productoTotal.unidadesVendidas, 2);
+        assert.equal(Number(productoTotal.ingreso), 20);
+        assert.equal(Number(productoTotal.costoDirectoUnitario), 2.5);
+        assert.equal(Number(productoTotal.costoDirectoTotal), 5);
+        assert.equal(Number(productoTotal.utilidadDirecta), 15);
+        assert.ok(
+          !total.productos.some((item) => item.productos_id === productoAjenoId),
+          "La rentabilidad de una empresa no debe incluir ventas de otra empresa.",
+        );
+        assert.equal(
+          Number(total.indirectos.agua.unidades) - Number(baselineTotal.indirectos.agua.unidades),
+          10,
+          "El denominador del costo de agua debe sumar solo las unidades producidas por el producto que usa agua.",
+        );
+        assert.ok(Math.abs(Number(total.indirectos.agua.gasto) - Number(baselineTotal.indirectos.agua.gasto) - 90) < 0.001);
+        const costoAguaUnitario = Number(total.indirectos.agua.gasto) / Number(total.indirectos.agua.unidades);
+        assert.ok(Math.abs(Number(productoTotal.costoConVariableUnitario) - (2.5 + costoAguaUnitario)) < 0.0001);
+        assert.ok(Math.abs(Number(productoTotal.costoConVariableTotal) - (2 * (2.5 + costoAguaUnitario))) < 0.001);
+        assert.ok(Math.abs(Number(productoTotal.utilidadConVariable) - (20 - 2 * (2.5 + costoAguaUnitario))) < 0.001);
+        assert.equal(productoTotal.costoDirectoNoVerificable, false);
+        assert.equal(productoTotal.costoConVariableNoVerificable, false);
+
+        const reporteDiaResponse = await request(
+          "GET",
+          `/api/reportes/rentabilidad?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}`,
+          { routeKey: "/api/reportes/rentabilidad", token: adminToken },
+        );
+        assertHttp(reporteDiaResponse, 200, "Reporte del día con rango personalizado");
+        const reporteDia = reporteDiaResponse.json?.data;
+        const productoDia = reporteDia?.productos?.find((item) => item.productos_id === productoReporte.id);
+        assert.ok(productoDia, "El rango de hoy debe incluir la venta con fecha local de hoy.");
+        assert.equal(productoDia.unidadesVendidas, 2);
+        assert.equal(Number(reporteDia.indirectos.agua.unidades) - Number(baselineDia.indirectos.agua.unidades), 10);
+        const diasDelMes = new Date(Date.UTC(
+          Number(PERIODO_COLOMBIA.slice(0, 4)),
+          Number(PERIODO_COLOMBIA.slice(5, 7)),
+          0,
+        )).getUTCDate();
+        const gastoAguaProrrateadoEsperado = 90 / diasDelMes;
+        assert.ok(
+          Math.abs(Number(reporteDia.indirectos.agua.gasto) - Number(baselineDia.indirectos.agua.gasto) - gastoAguaProrrateadoEsperado) < 0.001,
+          "La factura mensual debe prorratearse por los días incluidos en el rango colombiano.",
+        );
+        assert.equal(reporteDia.indirectos.agua.estimado, true);
+
+        const reporteAyer = await request(
+          "GET",
+          `/api/reportes/rentabilidad?desde=${ayer}&hasta=${ayer}`,
+          { routeKey: "/api/reportes/rentabilidad", token: adminToken },
+        );
+        assertHttp(reporteAyer, 200, "Reporte del día anterior");
+        assert.ok(
+          !reporteAyer.json?.data?.productos?.some((item) => item.productos_id === productoReporte.id),
+          "Una venta fechada hoy no debe aparecer en el rango del día anterior.",
+        );
+
+        // El periodo calculado "dia" y los rangos personalizados deben usar
+        // exactamente la misma fecha calendario colombiana.
+        const reportePeriodoDia = await request("GET", "/api/reportes/rentabilidad?periodo=dia", {
+          routeKey: "/api/reportes/rentabilidad",
+          token: adminToken,
+        });
+        assertHttp(reportePeriodoDia, 200, "Reporte del periodo dia");
+        assert.ok(
+          reportePeriodoDia.json?.data?.productos?.some((item) => item.productos_id === productoReporte.id),
+          "El periodo dia debe incluir las ventas con fecha calendario de hoy.",
+        );
+
+        // Ventas: una venta con fecha de hoy debe quedar fuera del día anterior.
+        const ventasHoy = await request(
+          "GET",
+          `/api/ventas?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}&page=1&limit=50`,
+          { routeKey: "/api/ventas", token: adminToken },
+        );
+        assertHttp(ventasHoy, 200, "Ventas filtradas por el día actual");
+        assert.ok(ventasHoy.json?.data?.some((venta) => venta.id === ventaReporte.id));
+
+        const ventasPeriodoDia = await request("GET", "/api/ventas?periodo=dia&page=1&limit=50", {
+          routeKey: "/api/ventas", token: adminToken,
+        });
+        assertHttp(ventasPeriodoDia, 200, "Ventas del periodo dia");
+        assert.ok(ventasPeriodoDia.json?.data?.some((venta) => venta.id === ventaReporte.id));
+
+        const ventasAyer = await request(
+          "GET",
+          `/api/ventas?desde=${ayer}&hasta=${ayer}&page=1&limit=50`,
+          { routeKey: "/api/ventas", token: adminToken },
+        );
+        assertHttp(ventasAyer, 200, "Ventas filtradas por el día anterior");
+        assert.ok(
+          !ventasAyer.json?.data?.some((venta) => venta.id === ventaReporte.id),
+          "Ventas no debe incluir hoy al consultar exclusivamente ayer.",
+        );
+
+        // Caja: el filtro de listado y el resumen deben respetar los mismos límites.
+        const cajaHoy = await request(
+          "GET",
+          `/api/caja?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}&page=1&limit=50`,
+          { routeKey: "/api/caja", token: adminToken },
+        );
+        assertHttp(cajaHoy, 200, "Movimientos de Caja de hoy");
+        assert.ok(cajaHoy.json?.data?.some((movimiento) => movimiento.id === ingresoCajaReporte.id));
+        assert.ok(cajaHoy.json?.data?.some((movimiento) => movimiento.id === facturaAguaReporte.id));
+
+        const cajaPeriodoDia = await request("GET", "/api/caja?periodo=dia&page=1&limit=50", {
+          routeKey: "/api/caja", token: adminToken,
+        });
+        assertHttp(cajaPeriodoDia, 200, "Movimientos de Caja del periodo dia");
+        assert.ok(cajaPeriodoDia.json?.data?.some((movimiento) => movimiento.id === ingresoCajaReporte.id));
+        assert.ok(cajaPeriodoDia.json?.data?.some((movimiento) => movimiento.id === facturaAguaReporte.id));
+
+        const cajaAyer = await request(
+          "GET",
+          `/api/caja?desde=${ayer}&hasta=${ayer}&page=1&limit=50`,
+          { routeKey: "/api/caja", token: adminToken },
+        );
+        assertHttp(cajaAyer, 200, "Movimientos de Caja de ayer");
+        assert.ok(
+          !cajaAyer.json?.data?.some((movimiento) => [ingresoCajaReporte.id, facturaAguaReporte.id].includes(movimiento.id)),
+          "Caja no debe incluir movimientos de hoy al consultar exclusivamente ayer.",
+        );
+
+        const cajaResumenHoy = await request(
+          "GET",
+          `/api/caja/resumen?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}`,
+          { routeKey: "/api/caja/resumen", token: adminToken },
+        );
+        assertHttp(cajaResumenHoy, 200, "Resumen de Caja del día actual");
+        assert.ok(Math.abs(Number(cajaResumenHoy.json?.data?.ingresos) - Number(baselineCajaHoy.ingresos) - 20) < 0.001);
+        assert.ok(Math.abs(Number(cajaResumenHoy.json?.data?.gastos) - Number(baselineCajaHoy.gastos) - 90) < 0.001);
+
+        const cajaResumenAyer = await request(
+          "GET",
+          `/api/caja/resumen?desde=${ayer}&hasta=${ayer}`,
+          { routeKey: "/api/caja/resumen", token: adminToken },
+        );
+        assertHttp(cajaResumenAyer, 200, "Resumen de Caja del día anterior");
+        assert.ok(Math.abs(Number(cajaResumenAyer.json?.data?.ingresos) - Number(baselineCajaAyer.ingresos)) < 0.001);
+        assert.ok(Math.abs(Number(cajaResumenAyer.json?.data?.gastos) - Number(baselineCajaAyer.gastos)) < 0.001);
+
+        // Producción: el lote actual aparece hoy y no debe filtrarse como si
+        // perteneciera a ayer por el límite superior del rango.
+        const produccionHoy = await request(
+          "GET",
+          `/api/produccion?desde=${FECHA_COLOMBIA}&hasta=${FECHA_COLOMBIA}&page=1&limit=50`,
+          { routeKey: "/api/produccion", token: adminToken },
+        );
+        assertHttp(produccionHoy, 200, "Producción filtrada por hoy");
+        assert.ok(produccionHoy.json?.data?.some((lote) => lote.id === loteReporte.id));
+
+        const produccionPeriodoDia = await request("GET", "/api/produccion?periodo=dia&page=1&limit=50", {
+          routeKey: "/api/produccion", token: adminToken,
+        });
+        assertHttp(produccionPeriodoDia, 200, "Producción del periodo dia");
+        assert.ok(produccionPeriodoDia.json?.data?.some((lote) => lote.id === loteReporte.id));
+
+        const produccionAyer = await request(
+          "GET",
+          `/api/produccion?desde=${ayer}&hasta=${ayer}&page=1&limit=50`,
+          { routeKey: "/api/produccion", token: adminToken },
+        );
+        assertHttp(produccionAyer, 200, "Producción filtrada por ayer");
+        assert.ok(
+          !produccionAyer.json?.data?.some((lote) => lote.id === loteReporte.id),
+          "Producción no debe incluir lotes de hoy al consultar exclusivamente ayer.",
+        );
+
+        const primerRegistroEsperado = async (modulo) => {
+          const consulta = modulo === "ventas"
+            ? prisma.ventas.aggregate({ where: { empresas_id: empresaId, anulada: false }, _min: { fecha: true } })
+            : modulo === "caja"
+              ? prisma.movimientos_caja.aggregate({ where: { empresas_id: empresaId, anulado: false }, _min: { fecha: true } })
+              : prisma.lotes_produccion.aggregate({ where: { empresas_id: empresaId, anulado: false }, _min: { fecha: true } });
+          const resultado = await consulta;
+          return resultado._min.fecha?.toISOString().slice(0, 10) ?? null;
+        };
+        for (const modulo of ["ventas", "caja", "produccion"]) {
+          const primero = await request("GET", `/api/reportes/primer-registro?modulo=${modulo}`, {
+            routeKey: "/api/reportes/primer-registro",
+            token: adminToken,
+          });
+          assertHttp(primero, 200, `Primer registro del módulo ${modulo}`);
+          assert.equal(primero.json?.data?.fecha, await primerRegistroEsperado(modulo));
+        }
+
+        const primerRegistroDesconocido = await request("GET", "/api/reportes/primer-registro?modulo=modulo-no-existente", {
+          routeKey: "/api/reportes/primer-registro",
+          token: adminToken,
+        });
+        assertHttp(primerRegistroDesconocido, 200, "Primer registro con módulo desconocido usa el consolidado");
+        const fechasMinimas = await Promise.all([
+          primerRegistroEsperado("ventas"),
+          primerRegistroEsperado("caja"),
+          primerRegistroEsperado("produccion"),
+        ]);
+        const consolidadoEsperado = fechasMinimas.filter(Boolean).sort()[0] ?? null;
+        assert.equal(primerRegistroDesconocido.json?.data?.fecha, consolidadoEsperado);
+
+        const reporteSecundario = await request("GET", "/api/reportes/rentabilidad?periodo=total", {
+          routeKey: "/api/reportes/rentabilidad",
+          token: adminTokenSecundaria,
+        });
+        assertHttp(reporteSecundario, 200, "Rentabilidad de empresa secundaria");
+        assert.ok(
+          reporteSecundario.json?.data?.productos?.some((item) => item.productos_id === productoAjenoId),
+          "La empresa secundaria debe ver su propia venta.",
+        );
+        const primerRegistroSecundario = await request("GET", "/api/reportes/primer-registro?modulo=ventas", {
+          routeKey: "/api/reportes/primer-registro",
+          token: adminTokenSecundaria,
+        });
+        assertHttp(primerRegistroSecundario, 200, "Primer registro de la empresa secundaria");
+        assert.equal(primerRegistroSecundario.json?.data?.fecha, FECHA_COLOMBIA);
+      });
+
       const primerRegistro = await request("GET", "/api/reportes/primer-registro?modulo=ventas", {
         routeKey: "/api/reportes/primer-registro",
         token: adminToken,
@@ -2917,6 +3378,11 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(publicProductos, 200, "GET /api/public/productos");
       assert.ok(publicProductos.json?.data?.some((item) => item.id === productoId));
+      assert.ok(publicProductos.json?.data?.some((item) => item.nombre === `Producto Reporte ${entorno.runId}`));
+      assert.ok(
+        !publicProductos.json?.data?.some((item) => item.id === productoAjenoId),
+        "El catálogo público debe limitarse a PUBLIC_EMPRESA_ID y no mostrar productos de otra empresa.",
+      );
 
       const eliminarProducto = await request("DELETE", `/api/productos/${productoId}`, {
         routeKey: "/api/productos/:id",
