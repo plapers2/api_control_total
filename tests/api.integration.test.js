@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import jwt from "jsonwebtoken";
 import prisma from "../src/db/prisma.js";
 import {
   EXPECTED_ENDPOINTS,
@@ -85,6 +86,10 @@ test("Suite integral de endpoints de Control Total", async (t) => {
     let passwordTemporal;
     let usuarioCreadoApiId;
     let empresaSecundariaId;
+    let adminTokenSecundaria;
+    let productoAjenoId;
+    let insumoAjenoId;
+    let clienteAjenoId;
 
     await t.test("Health check y autenticación", async () => {
       const health = await request("GET", "/health", { routeKey: "/health" });
@@ -93,6 +98,17 @@ test("Suite integral de endpoints de Control Total", async (t) => {
 
       const sinToken = await request("GET", "/api/auth/me");
       assertHttp(sinToken, 401, "GET /api/auth/me sin token");
+
+      const tokenInvalido = await request("GET", "/api/productos", {
+        routeKey: "/api/productos",
+        token: "esto-no-es-un-jwt-valido",
+      });
+      assertHttp(tokenInvalido, 401, "GET /api/productos con token inválido");
+
+      const productosSinToken = await request("GET", "/api/productos", {
+        routeKey: "/api/productos",
+      });
+      assertHttp(productosSinToken, 401, "GET /api/productos sin token");
 
       const login = await request("POST", "/api/auth/login", {
         routeKey: "/api/auth/login",
@@ -155,10 +171,15 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(empleadoLectura, 200, "GET /api/productos con empleado");
 
       const empleadoSinPermiso = await request("POST", "/api/productos", {
+        routeKey: "/api/productos",
         token: employeeToken,
-        body: { nombre: "No debe crearse", precio_venta: 1 },
+        body: { nombre: `Producto prohibido ${entorno.runId}`, precio_venta: 1 },
       });
       assertHttp(empleadoSinPermiso, 403, "POST /api/productos con empleado");
+      const productoProhibido = await prisma.productos.count({
+        where: { empresas_id: empresaId, nombre: `Producto prohibido ${entorno.runId}` },
+      });
+      assert.equal(productoProhibido, 0, "El rechazo por rol no debe crear productos.");
     });
 
     await t.test("Empresas, membresías y superadministración", async () => {
@@ -225,11 +246,113 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(crearEmpresaSecundaria, 201, "POST /api/superadmin/empresas");
       assert.ok(empresaSecundariaId);
 
+      // El mismo administrador tiene membresía independiente en la empresa secundaria.
+      // Se crean recursos ajenos exclusivamente allí para probar el aislamiento por tenant.
+      adminTokenSecundaria = jwt.sign(
+        { id: admin.id, empresas_id: empresaSecundariaId },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" },
+      );
+
+      const productoAjeno = await request("POST", "/api/productos", {
+        routeKey: "/api/productos",
+        token: adminTokenSecundaria,
+        body: {
+          nombre: `Producto Empresa B ${entorno.runId}`,
+          descripcion: "Recurso aislado de la empresa secundaria.",
+          precio_venta: 75,
+        },
+      });
+      assertHttp(productoAjeno, 201, "Crear producto de empresa secundaria");
+      productoAjenoId = productoAjeno.json?.data?.id;
+      assert.ok(productoAjenoId);
+
+      const insumoAjeno = await request("POST", "/api/insumos", {
+        routeKey: "/api/insumos",
+        token: adminTokenSecundaria,
+        body: {
+          nombre: `Insumo Empresa B ${entorno.runId}`,
+          unidad_medida: "kg",
+          stock_actual: 30,
+          stock_minimo: 1,
+          precio_unidad: 8,
+        },
+      });
+      assertHttp(insumoAjeno, 201, "Crear insumo de empresa secundaria");
+      insumoAjenoId = insumoAjeno.json?.data?.id;
+      assert.ok(insumoAjenoId);
+
+      const clienteAjeno = await request("POST", "/api/clientes", {
+        routeKey: "/api/clientes",
+        token: adminTokenSecundaria,
+        body: {
+          nombre: `Cliente Empresa B ${entorno.runId}`,
+          telefono: "3000000002",
+        },
+      });
+      assertHttp(clienteAjeno, 201, "Crear cliente de empresa secundaria");
+      clienteAjenoId = clienteAjeno.json?.data?.id;
+      assert.ok(clienteAjenoId);
+
       const accesoOtraEmpresa = await request("GET", `/api/empresas/${empresaSecundariaId}`, {
         routeKey: "/api/empresas/:id",
         token: adminToken,
       });
       assertHttp(accesoOtraEmpresa, 403, "GET /api/empresas/:id de otra empresa");
+
+      const productoAjenoAntes = await prisma.productos.findUnique({
+        where: { id: productoAjenoId },
+        select: { nombre: true, precio_venta: true, empresas_id: true },
+      });
+      const productoAjenoNoVisible = await request("GET", `/api/productos/${productoAjenoId}`, {
+        routeKey: "/api/productos/:id",
+        token: adminToken,
+      });
+      assertHttp(productoAjenoNoVisible, 404, "GET producto de otra empresa");
+
+      const modificarProductoAjeno = await request("PUT", `/api/productos/${productoAjenoId}`, {
+        routeKey: "/api/productos/:id",
+        token: adminToken,
+        body: { nombre: `Intento de modificación ${entorno.runId}`, precio_venta: 999 },
+      });
+      assertHttp(modificarProductoAjeno, 404, "PUT producto de otra empresa");
+      const productoAjenoDespues = await prisma.productos.findUnique({
+        where: { id: productoAjenoId },
+        select: { nombre: true, precio_venta: true, empresas_id: true },
+      });
+      assert.equal(productoAjenoDespues.nombre, productoAjenoAntes.nombre);
+      assert.equal(Number(productoAjenoDespues.precio_venta), Number(productoAjenoAntes.precio_venta));
+      assert.equal(productoAjenoDespues.empresas_id, empresaSecundariaId);
+
+      const insumoAjenoAntes = await prisma.insumos.findUnique({
+        where: { id: insumoAjenoId },
+        select: { nombre: true, stock_actual: true, empresas_id: true },
+      });
+      const insumoAjenoNoVisible = await request("GET", `/api/insumos/${insumoAjenoId}`, {
+        routeKey: "/api/insumos/:id",
+        token: adminToken,
+      });
+      assertHttp(insumoAjenoNoVisible, 404, "GET insumo de otra empresa");
+
+      const modificarInsumoAjeno = await request("PUT", `/api/insumos/${insumoAjenoId}`, {
+        routeKey: "/api/insumos/:id",
+        token: adminToken,
+        body: { nombre: `Intento de modificación ${entorno.runId}` },
+      });
+      assertHttp(modificarInsumoAjeno, 404, "PUT insumo de otra empresa");
+      const insumoAjenoDespues = await prisma.insumos.findUnique({
+        where: { id: insumoAjenoId },
+        select: { nombre: true, stock_actual: true, empresas_id: true },
+      });
+      assert.equal(insumoAjenoDespues.nombre, insumoAjenoAntes.nombre);
+      assert.equal(Number(insumoAjenoDespues.stock_actual), Number(insumoAjenoAntes.stock_actual));
+      assert.equal(insumoAjenoDespues.empresas_id, empresaSecundariaId);
+
+      const clienteAjenoNoVisible = await request("GET", `/api/clientes/${clienteAjenoId}`, {
+        routeKey: "/api/clientes/:id",
+        token: adminToken,
+      });
+      assertHttp(clienteAjenoNoVisible, 404, "GET cliente de otra empresa");
 
       const listarUsuariosSuperadmin = await request("GET", "/api/superadmin/usuarios", {
         routeKey: "/api/superadmin/usuarios",
@@ -248,6 +371,17 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       const bloqueadoCambio = await request("GET", "/api/auth/me", { token: pendingToken });
       assertHttp(bloqueadoCambio, 403, "GET /api/auth/me antes de cambiar contraseña");
       assert.equal(bloqueadoCambio.json?.code, "DEBE_CAMBIAR_PASSWORD");
+
+      const operacionConPasswordPendiente = await request("POST", "/api/productos", {
+        routeKey: "/api/productos",
+        token: pendingToken,
+        body: { nombre: `Producto bloqueado ${entorno.runId}`, precio_venta: 1 },
+      });
+      assertHttp(operacionConPasswordPendiente, 403, "POST /api/productos con cambio de contraseña pendiente");
+      assert.equal(operacionConPasswordPendiente.json?.code, "DEBE_CAMBIAR_PASSWORD");
+      assert.equal(await prisma.productos.count({
+        where: { empresas_id: empresaId, nombre: `Producto bloqueado ${entorno.runId}` },
+      }), 0, "Un usuario con cambio de contraseña pendiente no debe crear productos.");
 
       const cambiarPassword = await request("POST", "/api/auth/cambiar-password", {
         routeKey: "/api/auth/cambiar-password",
@@ -288,6 +422,39 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(insumo, 200, "GET /api/insumos/:id");
 
+      const insumoAntesDeRechazos = await prisma.insumos.findUnique({
+        where: { id: insumoId },
+        select: { stock_actual: true, precio_unidad: true },
+      });
+      const movimientosInsumoAntesDeRechazos = await prisma.movimientos_insumos.count({
+        where: { insumos_id: insumoId },
+      });
+
+      const ajusteNegativo = await request("POST", `/api/insumos/${insumoId}/ajuste`, {
+        routeKey: "/api/insumos/:id/ajuste",
+        token: adminToken,
+        body: { stock_real: -1, motivo: "Prueba negativa de la suite" },
+      });
+      assertHttp(ajusteNegativo, 400, "Ajuste de inventario con stock negativo");
+
+      const ajusteEmpleado = await request("POST", `/api/insumos/${insumoId}/ajuste`, {
+        routeKey: "/api/insumos/:id/ajuste",
+        token: employeeToken,
+        body: { stock_real: 99, motivo: "El empleado no debe ajustar inventario" },
+      });
+      assertHttp(ajusteEmpleado, 403, "Ajuste de inventario con rol empleado");
+
+      const insumoTrasRechazos = await prisma.insumos.findUnique({
+        where: { id: insumoId },
+        select: { stock_actual: true, precio_unidad: true },
+      });
+      const movimientosInsumoTrasRechazos = await prisma.movimientos_insumos.count({
+        where: { insumos_id: insumoId },
+      });
+      assert.equal(Number(insumoTrasRechazos.stock_actual), Number(insumoAntesDeRechazos.stock_actual));
+      assert.equal(Number(insumoTrasRechazos.precio_unidad), Number(insumoAntesDeRechazos.precio_unidad));
+      assert.equal(movimientosInsumoTrasRechazos, movimientosInsumoAntesDeRechazos);
+
       const ajuste = await request("POST", `/api/insumos/${insumoId}/ajuste`, {
         routeKey: "/api/insumos/:id/ajuste",
         token: adminToken,
@@ -316,6 +483,19 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         body: { nombre: `Insumo Suite Modificado ${entorno.runId}`, stock_minimo: 1 },
       });
       assertHttp(actualizarInsumo, 200, "PUT /api/insumos/:id");
+
+      const productoNegativo = await request("POST", "/api/productos", {
+        routeKey: "/api/productos",
+        token: adminToken,
+        body: {
+          nombre: `Producto precio negativo ${entorno.runId}`,
+          precio_venta: -1,
+        },
+      });
+      assertHttp(productoNegativo, 400, "POST /api/productos con precio negativo");
+      assert.equal(await prisma.productos.count({
+        where: { empresas_id: empresaId, nombre: `Producto precio negativo ${entorno.runId}` },
+      }), 0, "Un producto con precio negativo no debe persistirse.");
 
       const crearProducto = await request("POST", "/api/productos", {
         routeKey: "/api/productos",
@@ -355,6 +535,36 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(actualizarProducto, 200, "PUT /api/productos/:id");
 
+      const nombreProductoAntesDeRechazoEmpleado = (await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { nombre: true, precio_venta: true },
+      }));
+      const editarProductoEmpleado = await request("PUT", `/api/productos/${productoId}`, {
+        routeKey: "/api/productos/:id",
+        token: employeeToken,
+        body: { nombre: `Edición prohibida ${entorno.runId}`, precio_venta: 999 },
+      });
+      assertHttp(editarProductoEmpleado, 403, "PUT /api/productos/:id con rol empleado");
+      const productoTrasRechazoEmpleado = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { nombre: true, precio_venta: true },
+      });
+      assert.equal(productoTrasRechazoEmpleado.nombre, nombreProductoAntesDeRechazoEmpleado.nombre);
+      assert.equal(Number(productoTrasRechazoEmpleado.precio_venta), Number(nombreProductoAntesDeRechazoEmpleado.precio_venta));
+
+      const recetasAntesDeReferenciaAjena = await prisma.recetas.count({ where: { productos_id: productoId } });
+      const recetaConInsumoAjeno = await request("PUT", `/api/productos/${productoId}/receta`, {
+        routeKey: "/api/productos/:id/receta",
+        token: adminToken,
+        body: { insumos: [{ insumos_id: insumoAjenoId, cantidad: 0.1 }] },
+      });
+      assertHttp(recetaConInsumoAjeno, 400, "PUT receta con insumo de otra empresa");
+      assert.equal(
+        await prisma.recetas.count({ where: { productos_id: productoId } }),
+        recetasAntesDeReferenciaAjena,
+        "Una receta que referencia un insumo ajeno no debe reemplazar la receta existente.",
+      );
+
       const receta = await request("PUT", `/api/productos/${productoId}/receta`, {
         routeKey: "/api/productos/:id/receta",
         token: adminToken,
@@ -375,6 +585,76 @@ test("Suite integral de endpoints de Control Total", async (t) => {
     });
 
     await t.test("Caja, compras, recuperación histórica y servicios públicos", async () => {
+      const movimientosCajaAntesDeRechazos = await prisma.movimientos_caja.count({ where: { empresas_id: empresaId } });
+      const stockAntesDeRechazosCaja = await prisma.insumos.findUnique({
+        where: { id: insumoId },
+        select: { stock_actual: true },
+      });
+      const stockInsumoAjenoAntesDeRechazosCaja = await prisma.insumos.findUnique({
+        where: { id: insumoAjenoId },
+        select: { stock_actual: true },
+      });
+
+      const compraSinDetalle = await request("POST", "/api/caja", {
+        routeKey: "/api/caja",
+        token: adminToken,
+        body: {
+          tipo: "gasto",
+          categoria: "insumo",
+          monto: 100,
+          descripcion: "Esta compra inválida no debe persistirse",
+          fecha: FECHA_COLOMBIA,
+        },
+      });
+      assertHttp(compraSinDetalle, 400, "POST /api/caja compra de insumos sin detalle");
+
+      const compraConInsumoAjeno = await request("POST", "/api/caja", {
+        routeKey: "/api/caja",
+        token: adminToken,
+        body: {
+          tipo: "gasto",
+          categoria: "insumo",
+          monto: 8,
+          descripcion: "No se debe aceptar un insumo de otra empresa",
+          fecha: FECHA_COLOMBIA,
+          insumos: [{ insumos_id: insumoAjenoId, cantidad: 1, costo_unitario: 8 }],
+        },
+      });
+      assertHttp(compraConInsumoAjeno, 400, "POST /api/caja compra con insumo de otra empresa");
+
+      const cajaMontoNegativo = await request("POST", "/api/caja", {
+        routeKey: "/api/caja",
+        token: adminToken,
+        body: {
+          tipo: "gasto",
+          categoria: "otro",
+          monto: -10,
+          descripcion: "Este monto inválido no debe persistirse",
+          fecha: FECHA_COLOMBIA,
+        },
+      });
+      assertHttp(cajaMontoNegativo, 400, "POST /api/caja con monto negativo");
+
+      assert.equal(
+        await prisma.movimientos_caja.count({ where: { empresas_id: empresaId } }),
+        movimientosCajaAntesDeRechazos,
+        "Las operaciones de Caja rechazadas no deben crear movimientos.",
+      );
+      const stockTrasRechazosCaja = await prisma.insumos.findUnique({
+        where: { id: insumoId },
+        select: { stock_actual: true },
+      });
+      assert.equal(Number(stockTrasRechazosCaja.stock_actual), Number(stockAntesDeRechazosCaja.stock_actual));
+      const stockInsumoAjenoTrasRechazosCaja = await prisma.insumos.findUnique({
+        where: { id: insumoAjenoId },
+        select: { stock_actual: true },
+      });
+      assert.equal(
+        Number(stockInsumoAjenoTrasRechazosCaja.stock_actual),
+        Number(stockInsumoAjenoAntesDeRechazosCaja.stock_actual),
+        "Una compra rechazada no debe alterar el inventario de otra empresa.",
+      );
+
       const compra = await request("POST", "/api/caja", {
         routeKey: "/api/caja",
         token: adminToken,
@@ -503,10 +783,33 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(reconstruir, 200, "POST /api/caja/fondo-reconstruir");
 
+      const fondoAntesDeRechazoEmpleado = await prisma.fondo_reposicion_movimientos.findMany({
+        where: { empresas_id: empresaId },
+        orderBy: { id: "asc" },
+        select: { id: true, monto: true, monto_solicitado: true, estado_calculo: true, anulado: true },
+      });
       const empleadoSinPermiso = await request("POST", "/api/caja/fondo-reconstruir", {
+        routeKey: "/api/caja/fondo-reconstruir",
         token: employeeToken,
       });
       assertHttp(empleadoSinPermiso, 403, "POST /api/caja/fondo-reconstruir con empleado");
+      const fondoTrasRechazoEmpleado = await prisma.fondo_reposicion_movimientos.findMany({
+        where: { empresas_id: empresaId },
+        orderBy: { id: "asc" },
+        select: { id: true, monto: true, monto_solicitado: true, estado_calculo: true, anulado: true },
+      });
+      const normalizarFondo = (filas) => filas.map((fila) => ({
+        id: fila.id,
+        monto: String(fila.monto),
+        monto_solicitado: fila.monto_solicitado == null ? null : String(fila.monto_solicitado),
+        estado_calculo: fila.estado_calculo,
+        anulado: fila.anulado,
+      }));
+      assert.deepEqual(
+        normalizarFondo(fondoTrasRechazoEmpleado),
+        normalizarFondo(fondoAntesDeRechazoEmpleado),
+        "Un empleado no debe poder modificar el Fondo al intentar reconstruirlo.",
+      );
     });
 
     await t.test("Producción: crear, consultar, editar y anular lotes", async () => {
@@ -515,6 +818,35 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         token: adminToken,
       });
       assertHttp(lista, 200, "GET /api/produccion");
+
+      const lotesAntesDeReferenciaAjena = await prisma.lotes_produccion.count({ where: { empresas_id: empresaId } });
+      const stockProductoAjenoAntesProduccion = await prisma.productos.findUnique({
+        where: { id: productoAjenoId },
+        select: { stock_actual: true },
+      });
+      const produccionConProductoAjeno = await request("POST", "/api/produccion", {
+        routeKey: "/api/produccion",
+        token: adminToken,
+        body: {
+          fecha: FECHA_COLOMBIA,
+          notas: "Este lote no debe referenciar un producto de otra empresa",
+          items: [{ productos_id: productoAjenoId, cantidad: 1, costo_total: 10 }],
+        },
+      });
+      assertHttp(produccionConProductoAjeno, 400, "POST /api/produccion con producto de otra empresa");
+      assert.equal(
+        await prisma.lotes_produccion.count({ where: { empresas_id: empresaId } }),
+        lotesAntesDeReferenciaAjena,
+        "La producción con un producto ajeno no debe crear lotes.",
+      );
+      const stockProductoAjenoTrasProduccion = await prisma.productos.findUnique({
+        where: { id: productoAjenoId },
+        select: { stock_actual: true },
+      });
+      assert.equal(
+        Number(stockProductoAjenoTrasProduccion.stock_actual),
+        Number(stockProductoAjenoAntesProduccion.stock_actual),
+      );
 
       const crearLote = await request("POST", "/api/produccion", {
         routeKey: "/api/produccion",
@@ -592,6 +924,64 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(cliente, 200, "GET /api/clientes/:id");
 
+      const ventasAntesDeRechazos = await prisma.ventas.count({ where: { empresas_id: empresaId } });
+      const stockProductoAntesDeRechazos = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { stock_actual: true },
+      });
+      const stockProductoAjenoAntesDeRechazos = await prisma.productos.findUnique({
+        where: { id: productoAjenoId },
+        select: { stock_actual: true },
+      });
+
+      const ventaConClienteAjeno = await request("POST", "/api/ventas", {
+        routeKey: "/api/ventas",
+        token: adminToken,
+        body: {
+          fecha: FECHA_COLOMBIA,
+          canal: "punto_venta",
+          clientes_id: clienteAjenoId,
+          credito: true,
+          items: [{ productos_id: productoId, cantidad: 1, precio_unitario: 40 }],
+        },
+      });
+      assertHttp(ventaConClienteAjeno, 400, "POST /api/ventas con cliente de otra empresa");
+
+      const ventaConProductoAjeno = await request("POST", "/api/ventas", {
+        routeKey: "/api/ventas",
+        token: adminToken,
+        body: {
+          fecha: FECHA_COLOMBIA,
+          canal: "punto_venta",
+          clientes_id: clienteId,
+          items: [{ productos_id: productoAjenoId, cantidad: 1, precio_unitario: 40 }],
+        },
+      });
+      assertHttp(ventaConProductoAjeno, 400, "POST /api/ventas con producto de otra empresa");
+
+      const ventaSinItems = await request("POST", "/api/ventas", {
+        routeKey: "/api/ventas",
+        token: adminToken,
+        body: { fecha: FECHA_COLOMBIA, canal: "punto_venta", items: [] },
+      });
+      assertHttp(ventaSinItems, 400, "POST /api/ventas sin artículos");
+
+      assert.equal(
+        await prisma.ventas.count({ where: { empresas_id: empresaId } }),
+        ventasAntesDeRechazos,
+        "Las ventas rechazadas no deben crear encabezados de venta.",
+      );
+      const stockProductoTrasRechazos = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { stock_actual: true },
+      });
+      const stockProductoAjenoTrasRechazos = await prisma.productos.findUnique({
+        where: { id: productoAjenoId },
+        select: { stock_actual: true },
+      });
+      assert.equal(Number(stockProductoTrasRechazos.stock_actual), Number(stockProductoAntesDeRechazos.stock_actual));
+      assert.equal(Number(stockProductoAjenoTrasRechazos.stock_actual), Number(stockProductoAjenoAntesDeRechazos.stock_actual));
+
       const actualizarCliente = await request("PUT", `/api/clientes/${clienteId}`, {
         routeKey: "/api/clientes/:id",
         token: adminToken,
@@ -647,6 +1037,48 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(venta, 201, "POST /api/ventas");
       ventaId = venta.json?.data?.id;
       assert.ok(ventaId);
+
+      const ventaAntesDePermisosEmpleado = await prisma.ventas.findUnique({
+        where: { id: ventaId },
+        include: { ventas_items: true },
+      });
+      const stockAntesDePermisosEmpleado = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { stock_actual: true },
+      });
+
+      const editarVentaEmpleado = await request("PUT", `/api/ventas/${ventaId}`, {
+        routeKey: "/api/ventas/:id",
+        token: employeeToken,
+        body: {
+          items: [{ productos_id: productoId, cantidad: 3, precio_unitario: 1 }],
+          notas: "El empleado no debe editar esta venta",
+        },
+      });
+      assertHttp(editarVentaEmpleado, 403, "PUT /api/ventas/:id con rol empleado");
+
+      const anularVentaEmpleado = await request("DELETE", `/api/ventas/${ventaId}`, {
+        routeKey: "/api/ventas/:id",
+        token: employeeToken,
+        body: { motivo: "El empleado no debe anular esta venta" },
+      });
+      assertHttp(anularVentaEmpleado, 403, "DELETE /api/ventas/:id con rol empleado");
+
+      const ventaTrasPermisosEmpleado = await prisma.ventas.findUnique({
+        where: { id: ventaId },
+        include: { ventas_items: true },
+      });
+      const stockTrasPermisosEmpleado = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { stock_actual: true },
+      });
+      assert.equal(ventaTrasPermisosEmpleado.anulada, ventaAntesDePermisosEmpleado.anulada);
+      assert.equal(Number(ventaTrasPermisosEmpleado.total), Number(ventaAntesDePermisosEmpleado.total));
+      assert.deepEqual(
+        ventaTrasPermisosEmpleado.ventas_items.map((item) => [item.productos_id, Number(item.cantidad), Number(item.precio_unitario)]),
+        ventaAntesDePermisosEmpleado.ventas_items.map((item) => [item.productos_id, Number(item.cantidad), Number(item.precio_unitario)]),
+      );
+      assert.equal(Number(stockTrasPermisosEmpleado.stock_actual), Number(stockAntesDePermisosEmpleado.stock_actual));
 
       const ventasLista = await request("GET", "/api/ventas?page=1&limit=20", {
         routeKey: "/api/ventas",
