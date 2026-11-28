@@ -7,7 +7,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --env-file=.env --import ./tests/helpers/set-test-env.js --test tests/api.integration.test.js",
     "dev": "nodemon app.js",
     "start": "node app.js",
     "build": "npx prisma generate",
