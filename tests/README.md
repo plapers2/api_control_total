@@ -60,6 +60,19 @@ Además de la cobertura de rutas y permisos, la suite verifica tres escenarios t
 
 Estos casos comprueban escenarios específicos de concurrencia y rollback; no representan una prueba exhaustiva de todas las intercalaciones concurrentes posibles ni de todos los fallos de infraestructura.
 
+## Integridad de ciclos financieros
+
+La suite también comprueba los ciclos completos de edición y anulación:
+
+- Compra estructurada de insumos: verifica que la edición conserve los IDs de Caja, compra, detalle y movimiento de inventario, actualice cantidades/importes sin duplicar el evento del Fondo y que la anulación restaure el stock y el balance de Caja anteriores, anulando sus registros vinculados.
+- Gasto manual: verifica que el balance cambie por el monto registrado, refleje la edición y vuelva al valor anterior después de anularlo, sin crear eventos en el Fondo.
+- Venta con saldo a favor y abonos: verifica el consumo de saldo del cliente, la conservación de pagos y movimientos de Caja al editar la venta, y el recálculo de recuperaciones del Fondo con el nuevo total.
+- Edición financiera inválida: rechaza reducir el total por debajo del dinero ya recibido y comprueba que no se modifiquen venta, pagos, Caja, Fondo ni stock.
+- Anulación de venta: verifica la restauración del inventario, la anulación de ingresos de Caja y recuperaciones del Fondo, la conservación del historial de pagos y el reintegro del saldo a favor usado.
+- Devolución del saldo reintegrado: verifica que el saldo del cliente vuelva a cero y que la salida quede reflejada como gasto de Caja.
+
+Estos escenarios operan únicamente sobre la empresa temporal creada por la suite. No alteran registros de otras empresas ni realizan operaciones sobre la base productiva.
+
 ## Autoprueba del watchdog (sin base de datos)
 
 Para comprobar deliberadamente las alertas del watchdog sin abrir MariaDB ni arrancar Express, ejecutar:
