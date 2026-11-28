@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import jwt from "jsonwebtoken";
-import prisma from "../src/db/prisma.js";
+import prismaOriginal from "../src/db/prisma.js";
 import {
   EXPECTED_ENDPOINTS,
   FECHA_COLOMBIA,
@@ -10,9 +10,111 @@ import {
   crearClienteApi,
   crearEntornoPruebas,
   limpiarEntornoPruebas,
+  registrarFaseSuite,
+  obtenerDiagnosticoSuite,
+  instrumentarPrismaParaSuite,
 } from "./helpers/runtime.js";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p5sAAAAASUVORK5CYII=";
+const prisma = instrumentarPrismaParaSuite(prismaOriginal);
+
+const traceSuite = (message) => {
+  registrarFaseSuite(message);
+  if (process.env.SUITE_TRACE === "1") process.stderr.write(`[suite-trace] ${message}\n`);
+};
+
+function iniciarWatchdogSuite(getEntorno) {
+  const intervalMs = Number(process.env.SUITE_WATCHDOG_INTERVAL_MS) > 0
+    ? Number(process.env.SUITE_WATCHDOG_INTERVAL_MS)
+    : 10_000;
+  const warningMs = Number(process.env.SUITE_WATCHDOG_WARNING_MS) > 0
+    ? Number(process.env.SUITE_WATCHDOG_WARNING_MS)
+    : 25_000;
+
+  let expectedTick = Date.now() + intervalMs;
+  let ultimaAlerta = "";
+
+  const timer = setInterval(() => {
+    const now = Date.now();
+    const retrasoEventLoopMs = Math.max(0, now - expectedTick);
+    expectedTick = now + intervalMs;
+
+    const estado = obtenerDiagnosticoSuite();
+    const fase = estado.fase?.nombre ?? "Fase no registrada";
+    const sinAvanceMs = estado.fase?.iniciadaEn
+      ? now - estado.fase.iniciadaEn
+      : 0;
+
+    // No llena la consola cuando todo avanza normalmente: informa solo si
+    // la fase actual lleva al menos un intervalo sin registrar progreso.
+    if (sinAvanceMs < intervalMs) return;
+
+    const activos = estado.peticionesActivas ?? [];
+    const entorno = getEntorno();
+    const procesoApi = entorno?.server?.child;
+    const estadoApi = !procesoApi
+      ? "API de pruebas aún no disponible"
+      : procesoApi.exitCode !== null
+        ? `API de pruebas finalizó con código ${procesoApi.exitCode}`
+        : procesoApi.signalCode
+          ? `API de pruebas terminó por señal ${procesoApi.signalCode}`
+          : `API de pruebas activa en ${entorno.server.baseUrl}`;
+
+    const operacionesPrisma = estado.operacionesPrismaActivas ?? [];
+    const ultimaHttp = estado.ultimaPeticionHttp;
+    const ultimaPrisma = estado.ultimaOperacionPrisma;
+    const diagnosticoHttp = activos.length
+      ? `HTTP pendiente: ${activos.map((item) => `${item.method} ${item.path} (${((now - item.iniciadaEn) / 1000).toFixed(1)} s; límite ${item.timeoutMs} ms)`).join("; ")}. `
+      : `Sin HTTP pendiente${ultimaHttp ? `; última petición: ${ultimaHttp.method} ${ultimaHttp.path} ${ultimaHttp.resultado} (${ultimaHttp.duracionMs} ms)` : ""}. `;
+    const diagnosticoPrisma = operacionesPrisma.length
+      ? `Prisma pendiente: ${operacionesPrisma.map((item) => `${item.nombre} (${(item.duracionMs / 1000).toFixed(1)} s)`).join("; ")}. `
+      : `Sin operación Prisma pendiente${ultimaPrisma ? `; última operación: ${ultimaPrisma.nombre} ${ultimaPrisma.resultado} (${ultimaPrisma.duracionMs} ms)` : ""}. `;
+
+    process.stderr.write(
+      `[suite-watchdog] SIN AVANCE durante ${(sinAvanceMs / 1000).toFixed(0)} s. ` +
+      `Última fase: ${fase}. ` +
+      diagnosticoHttp +
+      diagnosticoPrisma +
+      `${estadoApi}.` +
+      (retrasoEventLoopMs >= 5_000
+        ? ` Retraso del event loop detectado: ${(retrasoEventLoopMs / 1000).toFixed(1)} s.`
+        : "") +
+      "\n",
+    );
+
+    if (sinAvanceMs >= warningMs) {
+      const claveAlerta = `${fase}:${estado.fase?.iniciadaEn ?? ""}`;
+      if (ultimaAlerta !== claveAlerta) {
+        ultimaAlerta = claveAlerta;
+        process.stderr.write(
+          `[suite-watchdog] ALERTA: la suite superó ${(warningMs / 1000).toFixed(0)} s sin cambiar de fase. ` +
+          "No se puede afirmar la causa raíz solo con el test; la última fase y las peticiones pendientes anteriores indican dónde investigar.\n",
+        );
+        const logsApi = entorno?.server?.getOutput?.() ?? "";
+        if (logsApi) {
+          process.stderr.write(`[suite-watchdog] Última salida de la API de pruebas:\n${logsApi.slice(-4000)}\n`);
+        }
+      }
+    } else {
+      ultimaAlerta = "";
+    }
+  }, intervalMs);
+
+  // El watchdog no debe mantener vivo el proceso si la suite ya terminó.
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+function testConDiagnostico(contexto, nombre, callback) {
+  return contexto.test(nombre, async (contextoHijo) => {
+    traceSuite(`INICIO subprueba: ${nombre}`);
+    try {
+      await callback(contextoHijo);
+    } finally {
+      traceSuite(`FIN subprueba: ${nombre}`);
+    }
+  });
+}
 
 async function crearCompraHistorica(entorno, insumoId) {
   const timestamp = new Date(Math.floor(Date.now() / 1000) * 1000);
@@ -65,10 +167,14 @@ async function crearCompraHistorica(entorno, insumoId) {
 
 test("Suite integral de endpoints de Control Total", async (t) => {
   let entorno;
+  let detenerWatchdog = null;
   const cobertura = new Set();
 
   try {
+    traceSuite("Preparando fixtures y verificando entorno de pruebas");
+    detenerWatchdog = iniciarWatchdogSuite(() => entorno);
     entorno = await crearEntornoPruebas();
+    traceSuite("Fixtures creados y API aislada disponible");
     const request = crearClienteApi(entorno, cobertura);
     const empresaId = entorno.company.id;
     const { admin, employee, pending, candidate } = entorno.users;
@@ -91,7 +197,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
     let insumoAjenoId;
     let clienteAjenoId;
 
-    await t.test("Health check y autenticación", async () => {
+    await testConDiagnostico(t, "Health check y autenticación", async () => {
       const health = await request("GET", "/health", { routeKey: "/health" });
       assertHttp(health, 200, "GET /health");
       assert.equal(health.json?.status, "ok");
@@ -182,7 +288,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assert.equal(productoProhibido, 0, "El rechazo por rol no debe crear productos.");
     });
 
-    await t.test("Empresas, membresías y superadministración", async () => {
+    await testConDiagnostico(t, "Empresas, membresías y superadministración", async () => {
       const misEmpresas = await request("GET", "/api/empresas", {
         routeKey: "/api/empresas",
         token: adminToken,
@@ -394,7 +500,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(perfilDesbloqueado, 200, "GET /api/auth/me después de cambiar contraseña");
     });
 
-    await t.test("Productos e insumos: alta, ajustes, conciliación y receta", async () => {
+    await testConDiagnostico(t, "Productos e insumos: alta, ajustes, conciliación y receta", async () => {
       const insumosIniciales = await request("GET", "/api/insumos", {
         routeKey: "/api/insumos",
         token: adminToken,
@@ -584,8 +690,11 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assert.ok(entorno.productImageUrl?.startsWith("/uploads/productos/"));
     });
 
-    await t.test("Caja, compras, recuperación histórica y servicios públicos", async () => {
+    await testConDiagnostico(t, "Caja, compras, recuperación histórica y servicios públicos", async (tCaja) => {
+      traceSuite("CAJA 00 - inicio del grupo");
+      traceSuite("CAJA 01 - antes de count movimientos_caja");
       const movimientosCajaAntesDeRechazos = await prisma.movimientos_caja.count({ where: { empresas_id: empresaId } });
+      traceSuite("CAJA 02 - count movimientos_caja completado");
       const stockAntesDeRechazosCaja = await prisma.insumos.findUnique({
         where: { id: insumoId },
         select: { stock_actual: true },
@@ -655,6 +764,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         "Una compra rechazada no debe alterar el inventario de otra empresa.",
       );
 
+      traceSuite("CAJA 10 - antes POST compra insumos valida");
       const compra = await request("POST", "/api/caja", {
         routeKey: "/api/caja",
         token: adminToken,
@@ -668,9 +778,11 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         },
       });
       assertHttp(compra, 201, "POST /api/caja compra de insumos");
+      traceSuite("CAJA 11 - POST compra insumos completado");
       movimientoCompraId = compra.json?.data?.id;
       assert.ok(movimientoCompraId);
 
+      traceSuite("CAJA 12 - antes PUT actualizar compra");
       const actualizarCompra = await request("PUT", `/api/caja/${movimientoCompraId}`, {
         routeKey: "/api/caja/:id",
         token: adminToken,
@@ -684,6 +796,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         },
       });
       assertHttp(actualizarCompra, 200, "PUT /api/caja/:id compra de insumos");
+      traceSuite("CAJA 13 - PUT actualizar compra completado");
 
       insumoHistoricoId = (await prisma.insumos.create({
         data: {
@@ -696,8 +809,11 @@ test("Suite integral de endpoints de Control Total", async (t) => {
           estado_costo: "verificado",
         },
       })).id;
+      traceSuite("CAJA 14 - antes crear compra historica directa en Prisma");
       const movimientoHistoricoId = await crearCompraHistorica(entorno, insumoHistoricoId);
+      traceSuite("CAJA 15 - compra historica creada");
 
+      traceSuite("CAJA 16 - antes recuperar compra historica por API");
       const recuperarHistorica = await request("POST", `/api/caja/compras-historicas/${movimientoHistoricoId}/recuperar`, {
         routeKey: "/api/caja/compras-historicas/:id/recuperar",
         token: adminToken,
@@ -765,6 +881,87 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(recibo, 201, "POST /api/caja factura de servicio público");
 
+      traceSuite("CAJA CONCURRENCIA 00 - se programa subprueba hija");
+      await testConDiagnostico(tCaja, "Recibos de servicio público duplicados concurrentemente: solo uno se registra", async () => {
+          traceSuite("CAJA CONCURRENCIA 01 - antes configurar agua");
+        const configurarAgua = await request("PUT", "/api/servicios-publicos/configuracion", {
+          routeKey: "/api/servicios-publicos/configuracion",
+          token: adminToken,
+          body: { servicio: "agua", dia_pago: 20 },
+        });
+        assertHttp(configurarAgua, 200, "Configurar servicio de agua para prueba concurrente");
+        traceSuite("CAJA CONCURRENCIA 02 - agua configurada");
+
+        const filtroAgua = {
+          empresas_id: empresaId,
+          tipo: "gasto",
+          categoria: "servicio_publico",
+          tipo_servicio: "agua",
+          periodo_servicio: PERIODO_COLOMBIA,
+          anulado: false,
+        };
+        traceSuite("CAJA CONCURRENCIA 03 - antes count recibos agua");
+        const recibosAntes = await prisma.movimientos_caja.count({ where: filtroAgua });
+        traceSuite("CAJA CONCURRENCIA 04 - count recibos agua completado");
+
+        traceSuite("CAJA CONCURRENCIA 05 - antes lanzar los dos POST concurrentes");
+        const intentos = await Promise.allSettled([
+          request("POST", "/api/caja", {
+            routeKey: "/api/caja",
+            token: adminToken,
+            timeoutMs: 15_000,
+            body: {
+              tipo: "gasto",
+              categoria: "servicio_publico",
+              tipo_servicio: "agua",
+              periodo_servicio: PERIODO_COLOMBIA,
+              monto: 19,
+              descripcion: "Recibo de agua concurrente A - suite",
+              fecha: FECHA_COLOMBIA,
+            },
+          }),
+          request("POST", "/api/caja", {
+            routeKey: "/api/caja",
+            token: adminToken,
+            timeoutMs: 15_000,
+            body: {
+              tipo: "gasto",
+              categoria: "servicio_publico",
+              tipo_servicio: "agua",
+              periodo_servicio: PERIODO_COLOMBIA,
+              monto: 19,
+              descripcion: "Recibo de agua concurrente B - suite",
+              fecha: FECHA_COLOMBIA,
+            },
+          }),
+        ]);
+        traceSuite("CAJA CONCURRENCIA 06 - ambas promesas finalizaron");
+        const erroresIntentos = intentos.filter((r) => r.status === "rejected");
+        assert.equal(
+          erroresIntentos.length,
+          0,
+          `Las solicitudes concurrentes de recibo no terminaron correctamente: ${erroresIntentos.map((r) => r.reason?.message).join(" | ")}`,
+        );
+        const [intentoA, intentoB] = intentos.map((r) => r.value);
+
+        assert.deepEqual(
+          [intentoA.status, intentoB.status].sort((a, b) => a - b),
+          [201, 409],
+          "Dos registros concurrentes del mismo servicio y periodo deben producir un único alta y un conflicto.",
+        );
+
+        traceSuite("CAJA CONCURRENCIA 07 - antes consultar recibos despues");
+        const recibosDespues = await prisma.movimientos_caja.findMany({
+          where: filtroAgua,
+          orderBy: { id: "asc" },
+          select: { id: true, monto: true, descripcion: true },
+        });
+        assert.equal(recibosDespues.length, recibosAntes + 1);
+        assert.equal(Number(recibosDespues.at(-1).monto), 19);
+        traceSuite("CAJA CONCURRENCIA 08 - prueba de recibos duplicados completada");
+      });
+
+      traceSuite("CAJA 30 - antes GET resumen servicios publicos");
       const resumenServicios = await request("GET", "/api/servicios-publicos", {
         routeKey: "/api/servicios-publicos",
         token: adminToken,
@@ -777,12 +974,14 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(fondo, 200, "GET /api/caja/fondo-resumen");
 
+      traceSuite("CAJA 31 - antes POST reconstruir fondo");
       const reconstruir = await request("POST", "/api/caja/fondo-reconstruir", {
         routeKey: "/api/caja/fondo-reconstruir",
         token: adminToken,
       });
       assertHttp(reconstruir, 200, "POST /api/caja/fondo-reconstruir");
 
+      traceSuite("CAJA 32 - antes snapshot fondo previo al rechazo empleado");
       const fondoAntesDeRechazoEmpleado = await prisma.fondo_reposicion_movimientos.findMany({
         where: { empresas_id: empresaId },
         orderBy: { id: "asc" },
@@ -812,7 +1011,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       );
     });
 
-    await t.test("Producción: crear, consultar, editar y anular lotes", async () => {
+    await testConDiagnostico(t, "Producción: crear, consultar, editar y anular lotes", async () => {
       const lista = await request("GET", "/api/produccion?page=1&limit=20", {
         routeKey: "/api/produccion",
         token: adminToken,
@@ -897,7 +1096,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assert.ok(loteActivoId);
     });
 
-    await t.test("Clientes, saldos a favor y deudas de ventas", async () => {
+    await testConDiagnostico(t, "Clientes, saldos a favor y deudas de ventas", async (tClientes) => {
       const crearCliente = await request("POST", "/api/clientes", {
         routeKey: "/api/clientes",
         token: adminToken,
@@ -1105,6 +1304,56 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(editarVenta, 200, "PUT /api/ventas/:id");
 
+      await testConDiagnostico(tClientes, "Rollback atómico de venta cuando líneas repetidas agotan el stock", async () => {
+        const productoAntes = await prisma.productos.findUnique({
+          where: { id: productoId },
+          select: { stock_actual: true },
+        });
+        const stockAntes = Number(productoAntes.stock_actual);
+        const cantidadPorLinea = Math.floor(stockAntes);
+        assert.ok(cantidadPorLinea > 0, `Se necesita stock positivo para probar rollback; stock actual: ${stockAntes}`);
+
+        const [ventasAntes, itemsAntes, cajaAntes, pagosAntes, fondoAntes] = await Promise.all([
+          prisma.ventas.count({ where: { empresas_id: empresaId } }),
+          prisma.ventas_items.count({ where: { ventas: { empresas_id: empresaId } } }),
+          prisma.movimientos_caja.count({ where: { empresas_id: empresaId } }),
+          prisma.pagos_venta.count({ where: { ventas: { empresas_id: empresaId } } }),
+          prisma.fondo_reposicion_movimientos.count({ where: { empresas_id: empresaId } }),
+        ]);
+
+        const ventaSinStockSuficiente = await request("POST", "/api/ventas", {
+          routeKey: "/api/ventas",
+          token: adminToken,
+          body: {
+            fecha: FECHA_COLOMBIA,
+            canal: "punto_venta",
+            clientes_id: clienteId,
+            credito: true,
+            items: [
+              { productos_id: productoId, cantidad: cantidadPorLinea, precio_unitario: 1 },
+              { productos_id: productoId, cantidad: cantidadPorLinea, precio_unitario: 1 },
+            ],
+          },
+        });
+        assertHttp(ventaSinStockSuficiente, 400, "Venta con líneas repetidas que exceden el stock total");
+
+        const [ventasDespues, itemsDespues, cajaDespues, pagosDespues, fondoDespues, productoDespues] = await Promise.all([
+          prisma.ventas.count({ where: { empresas_id: empresaId } }),
+          prisma.ventas_items.count({ where: { ventas: { empresas_id: empresaId } } }),
+          prisma.movimientos_caja.count({ where: { empresas_id: empresaId } }),
+          prisma.pagos_venta.count({ where: { ventas: { empresas_id: empresaId } } }),
+          prisma.fondo_reposicion_movimientos.count({ where: { empresas_id: empresaId } }),
+          prisma.productos.findUnique({ where: { id: productoId }, select: { stock_actual: true } }),
+        ]);
+
+        assert.equal(ventasDespues, ventasAntes, "El encabezado de venta debe revertirse cuando falla la validación final de stock.");
+        assert.equal(itemsDespues, itemsAntes, "Las líneas de la venta fallida no deben persistir.");
+        assert.equal(cajaDespues, cajaAntes, "El rollback no debe dejar movimientos de Caja.");
+        assert.equal(pagosDespues, pagosAntes, "El rollback no debe dejar pagos.");
+        assert.equal(fondoDespues, fondoAntes, "El rollback no debe dejar eventos en el Fondo.");
+        assert.equal(Number(productoDespues.stock_actual), stockAntes, "El stock debe recuperar su valor exacto anterior.");
+      });
+
       const deudas = await request("GET", "/api/deudas?page=1&limit=20", {
         routeKey: "/api/deudas",
         token: adminToken,
@@ -1116,6 +1365,90 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         token: adminToken,
       });
       assertHttp(resumenDeudas, 200, "GET /api/deudas/resumen");
+
+      await testConDiagnostico(tClientes, "Abonos concurrentes no duplican pagos, Caja ni recuperaciones del Fondo", async () => {
+        const ventaAntes = await prisma.ventas.findUnique({
+          where: { id: ventaId },
+          include: { pagos_venta: true },
+        });
+        const totalPagadoAntes = ventaAntes.pagos_venta.reduce((s, pago) => s + Number(pago.monto), 0);
+        const saldoAntes = Number(ventaAntes.total) - totalPagadoAntes;
+        assert.ok(saldoAntes > 2, `Se necesita una deuda pendiente suficiente; saldo actual: ${saldoAntes}`);
+
+        // Cada solicitud supera la mitad del saldo: solo una puede confirmarse sin sobrepasarlo.
+        const montoDuplicado = Math.min(saldoAntes, Math.ceil(saldoAntes / 2) + 1);
+        assert.ok(montoDuplicado <= saldoAntes && montoDuplicado * 2 > saldoAntes);
+
+        const [pagosAntes, cajaAntes, fondoAntes] = await Promise.all([
+          prisma.pagos_venta.findMany({ where: { ventas_id: ventaId }, select: { id: true, monto: true } }),
+          prisma.movimientos_caja.findMany({
+            where: { empresas_id: empresaId, ventas_id: ventaId, tipo: "ingreso", categoria: "venta", anulado: false },
+            select: { id: true, monto: true },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, venta_id: ventaId, tipo: "recuperacion", anulado: false },
+            select: { id: true, monto_cobrado: true, pago_venta_id: true },
+          }),
+        ]);
+
+        const intentosAbono = await Promise.allSettled([
+          request("POST", `/api/deudas/${ventaId}/pagos`, {
+            routeKey: "/api/deudas/:ventaId/pagos",
+            token: adminToken,
+            timeoutMs: 15_000,
+            body: { monto: montoDuplicado, nota: "Intento concurrente A - suite", fecha: FECHA_COLOMBIA },
+          }),
+          request("POST", `/api/deudas/${ventaId}/pagos`, {
+            routeKey: "/api/deudas/:ventaId/pagos",
+            token: adminToken,
+            timeoutMs: 15_000,
+            body: { monto: montoDuplicado, nota: "Intento concurrente B - suite", fecha: FECHA_COLOMBIA },
+          }),
+        ]);
+        const erroresAbono = intentosAbono.filter((r) => r.status === "rejected");
+        assert.equal(
+          erroresAbono.length,
+          0,
+          `Las solicitudes concurrentes de abono no terminaron correctamente: ${erroresAbono.map((r) => r.reason?.message).join(" | ")}`,
+        );
+        const [abonoA, abonoB] = intentosAbono.map((r) => r.value);
+
+        assert.deepEqual(
+          [abonoA.status, abonoB.status].sort((a, b) => a - b),
+          [201, 400],
+          "Dos abonos concurrentes que juntos superan el saldo deben dejar solo uno registrado.",
+        );
+
+        const [ventaDespues, pagosDespues, cajaDespues, fondoDespues] = await Promise.all([
+          prisma.ventas.findUnique({ where: { id: ventaId }, include: { pagos_venta: true } }),
+          prisma.pagos_venta.findMany({ where: { ventas_id: ventaId }, select: { id: true, monto: true } }),
+          prisma.movimientos_caja.findMany({
+            where: { empresas_id: empresaId, ventas_id: ventaId, tipo: "ingreso", categoria: "venta", anulado: false },
+            select: { id: true, monto: true },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, venta_id: ventaId, tipo: "recuperacion", anulado: false },
+            select: { id: true, monto_cobrado: true, pago_venta_id: true },
+          }),
+        ]);
+
+        const sumar = (filas, campo) => filas.reduce((s, fila) => s + Number(fila[campo] ?? 0), 0);
+        assert.equal(pagosDespues.length, pagosAntes.length + 1, "Debe existir exactamente un pago nuevo.");
+        assert.equal(Number((sumar(pagosDespues, "monto") - sumar(pagosAntes, "monto")).toFixed(2)), montoDuplicado);
+        assert.equal(cajaDespues.length, cajaAntes.length + 1, "Debe existir exactamente un ingreso nuevo en Caja.");
+        assert.equal(Number((sumar(cajaDespues, "monto") - sumar(cajaAntes, "monto")).toFixed(2)), montoDuplicado);
+        assert.equal(fondoDespues.length, fondoAntes.length + 1, "Debe existir exactamente una recuperación nueva en el Fondo.");
+        assert.equal(Number((sumar(fondoDespues, "monto_cobrado") - sumar(fondoAntes, "monto_cobrado")).toFixed(2)), montoDuplicado);
+
+        const pagoNuevo = pagosDespues.find((pago) => !pagosAntes.some((anterior) => anterior.id === pago.id));
+        assert.ok(pagoNuevo, "Debe identificarse el único pago generado por la operación concurrente.");
+        assert.ok(
+          fondoDespues.some((evento) => evento.pago_venta_id === pagoNuevo.id),
+          "La recuperación del Fondo debe quedar vinculada al pago confirmado.",
+        );
+        assert.equal(ventaDespues.estado_pago, "parcial");
+        assert.equal(Number((Number(ventaDespues.total) - sumar(pagosDespues, "monto")).toFixed(2)), Number((saldoAntes - montoDuplicado).toFixed(2)));
+      });
 
       const pagoVenta = await request("POST", `/api/deudas/${ventaId}/pagos`, {
         routeKey: "/api/deudas/:ventaId/pagos",
@@ -1157,7 +1490,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(eliminarCliente, 200, "DELETE /api/clientes/:id");
     });
 
-    await t.test("Caja, reportes y catálogo público: consultas finales", async () => {
+    await testConDiagnostico(t, "Caja, reportes y catálogo público: consultas finales", async () => {
       const cajaLista = await request("GET", "/api/caja?periodo=total&page=1&limit=50", {
         routeKey: "/api/caja",
         token: adminToken,
@@ -1219,12 +1552,18 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(eliminarInsumo, 200, "DELETE /api/insumos/:id");
     });
 
-    await t.test("Cobertura declarada de endpoints", async () => {
+    await testConDiagnostico(t, "Cobertura declarada de endpoints", async () => {
       const faltantes = EXPECTED_ENDPOINTS.filter((endpoint) => !cobertura.has(endpoint));
       assert.deepEqual(faltantes, [], `Quedaron endpoints sin ejecutar: ${faltantes.join(", ")}`);
       assert.equal(EXPECTED_ENDPOINTS.length, 76, "El inventario esperado contiene 75 endpoints de módulo más /health.");
     });
   } finally {
-    await limpiarEntornoPruebas(entorno);
+    traceSuite("Iniciando limpieza de fixtures temporales");
+    try {
+      await limpiarEntornoPruebas(entorno);
+    } finally {
+      traceSuite("Limpieza finalizada");
+      detenerWatchdog?.();
+    }
   }
 });

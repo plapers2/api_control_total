@@ -18,6 +18,127 @@ export const FECHA_COLOMBIA = new Intl.DateTimeFormat("en-CA", {
 
 export const PERIODO_COLOMBIA = FECHA_COLOMBIA.slice(0, 7);
 
+
+let faseActivaSuite = {
+  nombre: "Inicializando suite",
+  iniciadaEn: Date.now(),
+};
+const peticionesHttpActivas = new Map();
+let ultimaPeticionHttp = null;
+let secuenciaPeticionHttp = 0;
+const operacionesPrismaActivas = new Map();
+let ultimaOperacionPrisma = null;
+let secuenciaOperacionPrisma = 0;
+
+export function registrarFaseSuite(nombre) {
+  faseActivaSuite = {
+    nombre: String(nombre),
+    iniciadaEn: Date.now(),
+  };
+}
+
+export function obtenerDiagnosticoSuite() {
+  const ahora = Date.now();
+  return {
+    fase: { ...faseActivaSuite },
+    peticionesActivas: [...peticionesHttpActivas.values()].map((peticion) => ({
+      ...peticion,
+      duracionMs: ahora - peticion.iniciadaEn,
+    })),
+    ultimaPeticionHttp: ultimaPeticionHttp ? { ...ultimaPeticionHttp } : null,
+    operacionesPrismaActivas: [...operacionesPrismaActivas.values()].map((operacion) => ({
+      ...operacion,
+      duracionMs: ahora - operacion.iniciadaEn,
+    })),
+    ultimaOperacionPrisma: ultimaOperacionPrisma ? { ...ultimaOperacionPrisma } : null,
+  };
+}
+
+const METODOS_PRISMA_OBSERVADOS = new Set([
+  "findUnique", "findUniqueOrThrow", "findFirst", "findFirstOrThrow",
+  "findMany", "count", "aggregate", "groupBy",
+  "create", "createMany", "update", "updateMany", "upsert",
+  "delete", "deleteMany",
+]);
+
+/**
+ * Envuelve los delegados Prisma usados directamente por la suite para que el
+ * watchdog pueda identificar el modelo y método que sigue pendiente.
+ * No cambia argumentos, filtros ni resultados de las consultas.
+ */
+export function instrumentarPrismaParaSuite(cliente) {
+  const proxiesDelegados = new WeakMap();
+
+  return new Proxy(cliente, {
+    get(target, propiedad) {
+      const delegado = Reflect.get(target, propiedad, target);
+
+      if (
+        typeof propiedad === "string" &&
+        !propiedad.startsWith("$") &&
+        delegado &&
+        typeof delegado === "object"
+      ) {
+        if (!proxiesDelegados.has(delegado)) {
+          const proxyDelegado = new Proxy(delegado, {
+            get(modelo, metodo) {
+              const operacion = Reflect.get(modelo, metodo, modelo);
+              if (typeof operacion !== "function") return operacion;
+              if (!METODOS_PRISMA_OBSERVADOS.has(String(metodo))) return operacion.bind(modelo);
+
+              return (...args) => {
+                const id = ++secuenciaOperacionPrisma;
+                const iniciadaEn = Date.now();
+                const nombre = `prisma.${String(propiedad)}.${String(metodo)}`;
+                operacionesPrismaActivas.set(id, { id, nombre, iniciadaEn });
+
+                let resultado;
+                try {
+                  resultado = operacion.apply(modelo, args);
+                } catch (error) {
+                  operacionesPrismaActivas.delete(id);
+                  ultimaOperacionPrisma = {
+                    nombre,
+                    resultado: `ERROR ${error.message}`,
+                    duracionMs: Date.now() - iniciadaEn,
+                    finalizadaEn: Date.now(),
+                  };
+                  throw error;
+                }
+
+                return Promise.resolve(resultado).then(
+                  (valor) => {
+                    ultimaOperacionPrisma = {
+                      nombre,
+                      resultado: "completada",
+                      duracionMs: Date.now() - iniciadaEn,
+                      finalizadaEn: Date.now(),
+                    };
+                    return valor;
+                  },
+                  (error) => {
+                    ultimaOperacionPrisma = {
+                      nombre,
+                      resultado: `ERROR ${error.message}`,
+                      duracionMs: Date.now() - iniciadaEn,
+                      finalizadaEn: Date.now(),
+                    };
+                    throw error;
+                  },
+                ).finally(() => operacionesPrismaActivas.delete(id));
+              };
+            },
+          });
+          proxiesDelegados.set(delegado, proxyDelegado);
+        }
+        return proxiesDelegados.get(delegado);
+      }
+
+      return typeof delegado === "function" ? delegado.bind(target) : delegado;
+    },
+  });
+}
+
 export const EXPECTED_ENDPOINTS = [
   "POST /api/auth/login",
   "POST /api/auth/select-empresa",
@@ -316,6 +437,9 @@ export async function crearEntornoPruebas() {
 export function crearClienteApi(entorno, cobertura) {
   return async function request(method, pathName, options = {}) {
     const { token, body, form, routeKey } = options;
+    const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
+      ? options.timeoutMs
+      : 15_000;
     const methodUpper = method.toUpperCase();
     if (routeKey) cobertura.add(`${methodUpper} ${routeKey}`);
 
@@ -329,20 +453,67 @@ export function crearClienteApi(entorno, cobertura) {
       requestBody = JSON.stringify(body);
     }
 
-    const response = await fetch(new URL(pathName, entorno.server.baseUrl), {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const trace = process.env.SUITE_TRACE === "1";
+    const startedAt = Date.now();
+    const requestId = ++secuenciaPeticionHttp;
+    const requestState = {
+      id: requestId,
       method: methodUpper,
-      headers,
-      body: requestBody,
-    });
+      path: pathName,
+      iniciadaEn: startedAt,
+      timeoutMs,
+    };
+    peticionesHttpActivas.set(requestId, requestState);
+    if (trace) process.stderr.write(`[suite-http] INICIO ${methodUpper} ${pathName}\n`);
+    try {
+      const response = await fetch(new URL(pathName, entorno.server.baseUrl), {
+        method: methodUpper,
+        headers,
+        body: requestBody,
+        signal: controller.signal,
+      });
 
-    const raw = await response.text();
-    let json = null;
-    if (raw) {
-      try { json = JSON.parse(raw); }
-      catch { json = { raw }; }
+      // El límite cubre la recepción de encabezados y la lectura del cuerpo HTTP.
+      const raw = await response.text();
+      let json = null;
+      if (raw) {
+        try { json = JSON.parse(raw); }
+        catch { json = { raw }; }
+      }
+
+      ultimaPeticionHttp = {
+        method: methodUpper,
+        path: pathName,
+        resultado: `HTTP ${response.status}`,
+        finalizadaEn: Date.now(),
+        duracionMs: Date.now() - startedAt,
+      };
+      if (trace) process.stderr.write(`[suite-http] FIN ${methodUpper} ${pathName} HTTP ${response.status} en ${Date.now() - startedAt} ms\n`);
+      return { status: response.status, headers: response.headers, json };
+    } catch (error) {
+      ultimaPeticionHttp = {
+        method: methodUpper,
+        path: pathName,
+        resultado: controller.signal.aborted ? `TIMEOUT ${timeoutMs} ms` : `ERROR ${error.message}`,
+        finalizadaEn: Date.now(),
+        duracionMs: Date.now() - startedAt,
+      };
+      if (trace) process.stderr.write(`[suite-http] ERROR ${methodUpper} ${pathName} en ${Date.now() - startedAt} ms: ${error.message}\n`);
+      const logs = entorno.server?.getOutput?.() ?? "";
+      const causa = controller.signal.aborted
+        ? `superó el límite de ${timeoutMs} ms`
+        : error.message;
+      throw new Error(
+        `${methodUpper} ${pathName} no completó la petición: ${causa}.\n` +
+        `Últimos registros de la API de pruebas:\n${logs.slice(-6000) || "(sin salida capturada)"}`,
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timeout);
+      peticionesHttpActivas.delete(requestId);
     }
-
-    return { status: response.status, headers: response.headers, json };
   };
 }
 

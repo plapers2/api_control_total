@@ -14,7 +14,8 @@ La suite usa `node:test` y `fetch` nativos de Node. Requiere una versión de Nod
 
 - Carga las variables desde `.env`; no contiene nombres de bases de datos ni credenciales fijas.
 - Antes de crear datos, compara `DB_NAME` con `SELECT DATABASE()` y exige que el nombre termine en `_prueba` o `_test`.
-- Se niega a ejecutarse cuando `NODE_ENV=production`.
+- El comando `npm test` establece `NODE_ENV=test` únicamente para el proceso de pruebas y la API hija; no modifica `.env`.
+- La protección de escritura sigue dependiendo de la validación exacta entre `DB_NAME` y `SELECT DATABASE()`, y del sufijo `_prueba` o `_test`.
 - Crea una empresa y usuarios temporales con identificadores únicos para cada ejecución.
 - Arranca una instancia independiente de la API en un puerto libre; no utiliza ni detiene el servidor habitual del puerto 3000.
 - Ejecuta la limpieza de los registros temporales al finalizar, siguiendo las dependencias `RESTRICT` de MariaDB.
@@ -26,15 +27,35 @@ No interrumpas el proceso con Ctrl+C mientras ejecuta la suite, porque eso puede
 
 El inventario contiene los 75 endpoints de los módulos y `GET /health`. La prueba final falla si alguno de esos 76 endpoints no se ha ejercitado. Esto comprueba que cada ruta registrada fue llamada al menos una vez; no equivale a probar todas las combinaciones posibles de parámetros, errores y permisos.
 
-## Pruebas negativas y de seguridad
 
-La suite también comprueba respuestas de rechazo y ausencia de efectos secundarios en escenarios seleccionados:
+## Diagnóstico de pausas (watchdog)
 
-- Token ausente o inválido, empresa no seleccionada y usuario con cambio obligatorio de contraseña pendiente.
-- Rol de empleado al intentar crear o modificar productos, ajustar inventario, reconstruir el Fondo o editar/anular ventas.
-- Acceso desde una empresa a productos, insumos y clientes de otra empresa.
-- Referencias cruzadas entre empresas en recetas, compras de insumos, producción y ventas.
-- Datos inválidos, como precio o monto negativo, ajuste de stock negativo, compra de insumos sin detalle y venta sin artículos.
-- Verificación de que los rechazos no creen registros ni modifiquen los saldos, existencias, movimientos de inventario o Fondo comprobados.
+La suite mantiene un watchdog automático mientras prepara los fixtures, ejecuta cada subprueba y limpia los datos temporales. Si una fase permanece sin cambios, escribe `[suite-watchdog]` con:
 
-Estos casos son una selección de controles críticos, no una matriz exhaustiva de todos los campos y roles de los 76 endpoints. Cada nueva regla de negocio o permiso debe tener sus propios casos específicos.
+- la última fase/checkpoint registrado y cuánto tiempo lleva sin avanzar;
+- las peticiones HTTP que sigan pendientes, con método, ruta y duración;
+- si el proceso de la API aislada continúa activo;
+- retraso del event loop, cuando se detecta una pausa de ejecución de Node;
+- los últimos registros capturados de la API cuando se supera el umbral de alerta.
+
+Por defecto revisa cada 10 segundos y emite una alerta a partir de 25 segundos sin cambio de fase. Estos valores pueden ajustarse con `SUITE_WATCHDOG_INTERVAL_MS` y `SUITE_WATCHDOG_WARNING_MS`. Las trazas detalladas `[suite-trace]` y `[suite-http]` siguen activándose con `SUITE_TRACE=1`.
+
+Si no hay una petición HTTP pendiente, el watchdog indica que la espera puede estar en Prisma, en otra operación asíncrona o en el runner. El watchdog identifica el último punto conocido, pero no puede asegurar por sí solo la causa raíz de un bloqueo interno; para eso se necesita inspeccionar la consulta o los bloqueos de MariaDB.
+
+## Diagnóstico automático de pausas (watchdog)
+
+La suite vigila automáticamente las fases de ejecución y de limpieza. Si una fase permanece sin cambios, informa el último checkpoint, el tiempo transcurrido, las peticiones HTTP pendientes y las operaciones Prisma directas pendientes (modelo y método). También indica si el servidor hijo sigue activo y detecta retrasos del event loop.
+
+Por defecto revisa cada 10 segundos y genera una alerta a partir de 25 segundos sin cambio de fase. Se ajusta con `SUITE_WATCHDOG_INTERVAL_MS` y `SUITE_WATCHDOG_WARNING_MS`. No necesita configuración adicional. Para ver todas las trazas `[suite-trace]` y `[suite-http]`, establecer `SUITE_TRACE=1`.
+
+El watchdog permite ubicar el punto probable de espera. Si se bloquea dentro de código de la API, un helper Prisma que no esté instrumentado o una operación externa, puede indicar la última fase pero no asegurar por sí solo la causa raíz; se requiere revisar los logs o MariaDB.
+
+## Integridad transaccional
+
+Además de la cobertura de rutas y permisos, la suite verifica tres escenarios transaccionales controlados:
+
+- Dos altas simultáneas del mismo recibo de servicio público, empresa, servicio y periodo: debe persistir una sola y la otra debe responder conflicto HTTP 409.
+- Dos abonos simultáneos cuyo importe combinado supera el saldo de una misma venta: debe confirmarse uno solo, manteniendo coherencia entre `pagos_venta`, ingresos de Caja y recuperación vinculada del Fondo.
+- Una venta con dos líneas del mismo producto que, en conjunto, exceden el stock: debe rechazarse y revertir encabezado, líneas, stock y cualquier efecto asociado en Caja, pagos y Fondo.
+
+Estos casos comprueban escenarios específicos de concurrencia y rollback; no representan una prueba exhaustiva de todas las intercalaciones concurrentes posibles ni de todos los fallos de infraestructura.
