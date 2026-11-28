@@ -859,19 +859,165 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       const movimientoHistoricoId = await crearCompraHistorica(entorno, insumoHistoricoId);
       traceSuite("CAJA 15 - compra historica creada");
 
-      traceSuite("CAJA 16 - antes recuperar compra historica por API");
-      const recuperarHistorica = await request("POST", `/api/caja/compras-historicas/${movimientoHistoricoId}/recuperar`, {
-        routeKey: "/api/caja/compras-historicas/:id/recuperar",
-        token: adminToken,
-      });
-      assertHttp(recuperarHistorica, 200, "POST /api/caja/compras-historicas/:id/recuperar");
-      assert.equal(recuperarHistorica.json?.data?.ya_recuperada, false);
+      await testConDiagnostico(tCaja, "Recuperación histórica: aislamiento, enlace sin duplicar inventario e idempotencia", async () => {
+        const notaEntradaHistorica = `Compra registrada en caja #${movimientoHistoricoId}`;
+        const [stockHistoricoAntes, movimientosHistoricosAntes, eventosHistoricosAntes, comprasHistoricasAntes] = await Promise.all([
+          prisma.insumos.findUnique({ where: { id: insumoHistoricoId }, select: { stock_actual: true } }),
+          prisma.movimientos_insumos.findMany({
+            where: { insumos_id: insumoHistoricoId, nota: notaEntradaHistorica },
+            select: { id: true, cantidad: true, costo_total: true, anulado: true, compra_item_id: true },
+            orderBy: { id: "asc" },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, movimiento_caja_id: movimientoHistoricoId, tipo: "compra" },
+            select: { id: true, estado_calculo: true, compra_insumos_id: true, anulado: true },
+          }),
+          prisma.compras_insumos.count({ where: { movimientos_caja_id: movimientoHistoricoId } }),
+        ]);
+        assert.equal(movimientosHistoricosAntes.length, 1);
+        assert.equal(eventosHistoricosAntes.length, 1);
+        assert.equal(eventosHistoricosAntes[0].estado_calculo, "incompleto");
+        assert.equal(comprasHistoricasAntes, 0);
 
-      const repetirRecuperacion = await request("POST", `/api/caja/compras-historicas/${movimientoHistoricoId}/recuperar`, {
-        token: adminToken,
+        const recuperarDesdeOtraEmpresa = await request("POST", `/api/caja/compras-historicas/${movimientoHistoricoId}/recuperar`, {
+          routeKey: "/api/caja/compras-historicas/:id/recuperar",
+          token: adminTokenSecundaria,
+        });
+        assertHttp(recuperarDesdeOtraEmpresa, 404, "No se puede recuperar una compra histórica de otra empresa");
+        assert.equal(await prisma.compras_insumos.count({ where: { movimientos_caja_id: movimientoHistoricoId } }), 0);
+
+        traceSuite("CAJA 16 - antes recuperar compra historica por API");
+        const recuperarHistorica = await request("POST", `/api/caja/compras-historicas/${movimientoHistoricoId}/recuperar`, {
+          routeKey: "/api/caja/compras-historicas/:id/recuperar",
+          token: adminToken,
+        });
+        assertHttp(recuperarHistorica, 200, "POST /api/caja/compras-historicas/:id/recuperar");
+        assert.equal(recuperarHistorica.json?.data?.ya_recuperada, false);
+
+        const compraRecuperada = await prisma.compras_insumos.findFirst({
+          where: { movimientos_caja_id: movimientoHistoricoId },
+          include: { items: { include: { movimiento_insumos: true } } },
+        });
+        const movimientosHistoricosDespues = await prisma.movimientos_insumos.findMany({
+          where: { insumos_id: insumoHistoricoId, nota: notaEntradaHistorica },
+          select: { id: true, cantidad: true, costo_total: true, anulado: true, compra_item_id: true },
+          orderBy: { id: "asc" },
+        });
+        const eventosHistoricosDespues = await prisma.fondo_reposicion_movimientos.findMany({
+          where: { empresas_id: empresaId, movimiento_caja_id: movimientoHistoricoId, tipo: "compra" },
+          select: { id: true, estado_calculo: true, compra_insumos_id: true, anulado: true },
+        });
+        const stockHistoricoDespues = await prisma.insumos.findUnique({
+          where: { id: insumoHistoricoId },
+          select: { stock_actual: true },
+        });
+
+        assert.ok(compraRecuperada);
+        assert.equal(compraRecuperada.items.length, 1);
+        assert.equal(compraRecuperada.items[0].movimiento_insumos.id, movimientosHistoricosAntes[0].id,
+          "La recuperación debe enlazar la entrada histórica existente, no crear otra.");
+        assert.equal(movimientosHistoricosDespues.length, movimientosHistoricosAntes.length);
+        assert.equal(movimientosHistoricosDespues[0].id, movimientosHistoricosAntes[0].id);
+        assert.deepEqual(
+          movimientosHistoricosDespues.map(row => [row.id, Number(row.cantidad), Number(row.costo_total), row.anulado]),
+          movimientosHistoricosAntes.map(row => [row.id, Number(row.cantidad), Number(row.costo_total), row.anulado]),
+          "La recuperación debe conservar la cantidad, el costo y el estado de la entrada histórica.",
+        );
+        assert.equal(movimientosHistoricosDespues[0].compra_item_id, compraRecuperada.items[0].id);
+        assert.equal(Number(stockHistoricoDespues.stock_actual), Number(stockHistoricoAntes.stock_actual),
+          "Recuperar el detalle histórico no debe volver a ingresar inventario.");
+        assert.equal(eventosHistoricosDespues.length, 1);
+        assert.equal(eventosHistoricosDespues[0].id, eventosHistoricosAntes[0].id);
+        assert.equal(eventosHistoricosDespues[0].estado_calculo, "historico_calculado");
+        assert.equal(eventosHistoricosDespues[0].compra_insumos_id, compraRecuperada.id);
+        assert.equal(eventosHistoricosDespues[0].anulado, false);
+
+        const repetirRecuperacion = await request("POST", `/api/caja/compras-historicas/${movimientoHistoricoId}/recuperar`, {
+          routeKey: "/api/caja/compras-historicas/:id/recuperar",
+          token: adminToken,
+        });
+        assertHttp(repetirRecuperacion, 200, "Repetir recuperación histórica");
+        assert.equal(repetirRecuperacion.json?.data?.ya_recuperada, true);
+
+        const [comprasTrasRepetir, movimientosTrasRepetir, eventosTrasRepetir, stockTrasRepetir] = await Promise.all([
+          prisma.compras_insumos.findMany({
+            where: { movimientos_caja_id: movimientoHistoricoId },
+            include: { items: true },
+          }),
+          prisma.movimientos_insumos.findMany({
+            where: { insumos_id: insumoHistoricoId, nota: notaEntradaHistorica },
+            select: { id: true, compra_item_id: true },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, movimiento_caja_id: movimientoHistoricoId, tipo: "compra" },
+            select: { id: true, compra_insumos_id: true, estado_calculo: true },
+          }),
+          prisma.insumos.findUnique({ where: { id: insumoHistoricoId }, select: { stock_actual: true } }),
+        ]);
+        assert.equal(comprasTrasRepetir.length, 1, "La recuperación repetida no debe crear otra compra.");
+        assert.equal(comprasTrasRepetir[0].id, compraRecuperada.id);
+        assert.equal(comprasTrasRepetir[0].items.length, 1);
+        assert.equal(movimientosTrasRepetir.length, 1, "La recuperación repetida no debe duplicar entradas de inventario.");
+        assert.equal(movimientosTrasRepetir[0].id, movimientosHistoricosAntes[0].id);
+        assert.equal(movimientosTrasRepetir[0].compra_item_id, compraRecuperada.items[0].id);
+        assert.equal(eventosTrasRepetir.length, 1);
+        assert.equal(eventosTrasRepetir[0].id, eventosHistoricosAntes[0].id);
+        assert.equal(eventosTrasRepetir[0].compra_insumos_id, compraRecuperada.id);
+        assert.equal(eventosTrasRepetir[0].estado_calculo, "historico_calculado");
+        assert.equal(Number(stockTrasRepetir.stock_actual), Number(stockHistoricoAntes.stock_actual));
+
+        // Una compra histórica sin entradas verificables debe rechazarse sin crear detalle ni alterar el Fondo.
+        const fechaIncompleta = new Date(`${FECHA_COLOMBIA}T05:00:00.000Z`);
+        const movimientoSinEntrada = await prisma.movimientos_caja.create({
+          data: {
+            empresas_id: empresaId,
+            usuarios_id: admin.id,
+            tipo: "gasto",
+            categoria: "insumo",
+            monto: 9.75,
+            descripcion: `Compra histórica incompleta ${entorno.runId}`,
+            fecha: fechaIncompleta,
+          },
+        });
+        const eventoSinEntrada = await prisma.fondo_reposicion_movimientos.create({
+          data: {
+            empresas_id: empresaId,
+            tipo: "compra",
+            origen: "compra_hist_sin_entrada",
+            monto: 0,
+            monto_solicitado: 9.75,
+            monto_externo: 9.75,
+            estado_calculo: "incompleto",
+            movimiento_caja_id: movimientoSinEntrada.id,
+            fecha: fechaIncompleta,
+          },
+        });
+        const stockAntesRechazoHistorico = Number((await prisma.insumos.findUnique({
+          where: { id: insumoHistoricoId },
+          select: { stock_actual: true },
+        })).stock_actual);
+
+        const recuperarSinEntradas = await request("POST", `/api/caja/compras-historicas/${movimientoSinEntrada.id}/recuperar`, {
+          routeKey: "/api/caja/compras-historicas/:id/recuperar",
+          token: adminToken,
+        });
+        assertHttp(recuperarSinEntradas, 409, "Una compra histórica sin entradas verificables debe requerir revisión");
+        assert.equal(await prisma.compras_insumos.count({ where: { movimientos_caja_id: movimientoSinEntrada.id } }), 0);
+        assert.equal(await prisma.movimientos_insumos.count({ where: { nota: `Compra registrada en caja #${movimientoSinEntrada.id}` } }), 0);
+        const eventoRechazado = await prisma.fondo_reposicion_movimientos.findUnique({ where: { id: eventoSinEntrada.id } });
+        const movimientoRechazado = await prisma.movimientos_caja.findUnique({ where: { id: movimientoSinEntrada.id } });
+        assert.equal(eventoRechazado.estado_calculo, "incompleto");
+        assert.equal(eventoRechazado.compra_insumos_id, null);
+        assert.equal(eventoRechazado.anulado, false);
+        assert.equal(movimientoRechazado.anulado, false);
+        assert.equal(Number((await prisma.insumos.findUnique({ where: { id: insumoHistoricoId }, select: { stock_actual: true } })).stock_actual), stockAntesRechazoHistorico);
+
+        // Retirar el fixture inválido creado directamente por este subtest.
+        await prisma.$transaction(async tx => {
+          await tx.fondo_reposicion_movimientos.delete({ where: { id: eventoSinEntrada.id } });
+          await tx.movimientos_caja.delete({ where: { id: movimientoSinEntrada.id } });
+        });
       });
-      assertHttp(repetirRecuperacion, 200, "Repetir recuperación histórica");
-      assert.equal(repetirRecuperacion.json?.data?.ya_recuperada, true);
 
       await testConDiagnostico(tCaja, "Ciclo de gasto manual: editar y anular restaura el balance de Caja", async () => {
         const balanceAntesGasto = await obtenerBalanceCajaSuite();
@@ -1294,6 +1440,75 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       });
       assertHttp(saldoInicial, 200, "GET /api/clientes/:id/saldo");
 
+      await testConDiagnostico(tClientes, "Saldos a favor: montos inválidos y devoluciones superiores al saldo no generan movimientos", async () => {
+        const clienteAntes = await prisma.clientes.findUnique({
+          where: { id: clienteId },
+          select: { saldo_favor: true },
+        });
+        const saldosAntes = await prisma.saldos_cliente.findMany({
+          where: { empresas_id: empresaId, clientes_id: clienteId },
+          select: { id: true, tipo: true, monto: true, ventas_id: true },
+          orderBy: { id: "asc" },
+        });
+        const cajaAntes = await prisma.movimientos_caja.findMany({
+          where: { empresas_id: empresaId, clientes_id: clienteId },
+          select: { id: true, tipo: true, categoria: true, monto: true, anulado: true },
+          orderBy: { id: "asc" },
+        });
+
+        const devolucionEmpleado = await request("POST", `/api/clientes/${clienteId}/saldo/devolucion`, {
+          routeKey: "/api/clientes/:id/saldo/devolucion",
+          token: employeeToken,
+          body: { monto: 1, nota: "Empleado sin permiso de devolver saldo", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(devolucionEmpleado, 403, "Un empleado no puede devolver saldo a favor");
+
+        const devolverSinSaldo = await request("POST", `/api/clientes/${clienteId}/saldo/devolucion`, {
+          routeKey: "/api/clientes/:id/saldo/devolucion",
+          token: adminToken,
+          body: { monto: 1, nota: "Intento de devolución sin saldo", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(devolverSinSaldo, 400, "No se puede devolver más saldo del disponible");
+
+        const depositoNegativo = await request("POST", `/api/clientes/${clienteId}/saldo`, {
+          routeKey: "/api/clientes/:id/saldo",
+          token: adminToken,
+          body: { monto: -2, nota: "Depósito negativo inválido", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(depositoNegativo, 400, "No se puede registrar un depósito negativo");
+
+        const depositoCero = await request("POST", `/api/clientes/${clienteId}/saldo`, {
+          routeKey: "/api/clientes/:id/saldo",
+          token: adminToken,
+          body: { monto: 0, nota: "Depósito cero inválido", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(depositoCero, 400, "No se puede registrar un depósito de cero");
+
+        const clienteDespues = await prisma.clientes.findUnique({
+          where: { id: clienteId },
+          select: { saldo_favor: true },
+        });
+        const saldosDespues = await prisma.saldos_cliente.findMany({
+          where: { empresas_id: empresaId, clientes_id: clienteId },
+          select: { id: true, tipo: true, monto: true, ventas_id: true },
+          orderBy: { id: "asc" },
+        });
+        const cajaDespues = await prisma.movimientos_caja.findMany({
+          where: { empresas_id: empresaId, clientes_id: clienteId },
+          select: { id: true, tipo: true, categoria: true, monto: true, anulado: true },
+          orderBy: { id: "asc" },
+        });
+
+        assert.equal(Number(clienteDespues.saldo_favor), Number(clienteAntes.saldo_favor));
+        assert.deepEqual(saldosDespues.map(row => [row.id, row.tipo, Number(row.monto), row.ventas_id]),
+          saldosAntes.map(row => [row.id, row.tipo, Number(row.monto), row.ventas_id]));
+        assert.deepEqual(cajaDespues.map(row => [row.id, row.tipo, row.categoria, Number(row.monto), row.anulado]),
+          cajaAntes.map(row => [row.id, row.tipo, row.categoria, Number(row.monto), row.anulado]));
+      });
+
+      const cajaAntesMovimientosSaldoSinCaja = await prisma.movimientos_caja.count({
+        where: { empresas_id: empresaId, clientes_id: clienteId },
+      });
       const deposito = await request("POST", `/api/clientes/${clienteId}/saldo`, {
         routeKey: "/api/clientes/:id/saldo",
         token: adminToken,
@@ -1307,6 +1522,26 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         body: { monto: 5, nota: "Devolución temporal de suite", fecha: FECHA_COLOMBIA, registrar_en_caja: false },
       });
       assertHttp(devolucion, 201, "POST /api/clientes/:id/saldo/devolucion");
+
+      const saldoNeutro = await prisma.clientes.findUnique({
+        where: { id: clienteId },
+        select: { saldo_favor: true },
+      });
+      const movimientosSaldoSinCaja = await prisma.saldos_cliente.findMany({
+        where: { empresas_id: empresaId, clientes_id: clienteId },
+        orderBy: { id: "asc" },
+        select: { tipo: true, monto: true },
+      });
+      assert.equal(Number(saldoNeutro.saldo_favor), 0);
+      assert.deepEqual(movimientosSaldoSinCaja.map(row => [row.tipo, Number(row.monto)]), [
+        ["deposito", 5],
+        ["devolucion", 5],
+      ]);
+      assert.equal(
+        await prisma.movimientos_caja.count({ where: { empresas_id: empresaId, clientes_id: clienteId } }),
+        cajaAntesMovimientosSaldoSinCaja,
+        "Registrar depósito/devolución con registrar_en_caja=false no debe crear movimientos en Caja.",
+      );
 
       const saldoCajaAntesVenta = await obtenerBalanceCajaVentas();
       const depositoParaVenta = await request("POST", `/api/clientes/${clienteId}/saldo`, {
@@ -1323,6 +1558,29 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         select: { stock_actual: true },
       });
       const stockAntesVenta = Number(productoStockAntesVenta.stock_actual);
+      const saldoCajaTrasDeposito = await obtenerBalanceCajaVentas();
+      const ventasAntesSaldoExcesivo = await prisma.ventas.count({ where: { empresas_id: empresaId } });
+      const movimientosCajaAntesSaldoExcesivo = await prisma.movimientos_caja.count({ where: { empresas_id: empresaId } });
+      const movimientosSaldoAntesSaldoExcesivo = await prisma.saldos_cliente.count({ where: { empresas_id: empresaId, clientes_id: clienteId } });
+
+      const saldoMayorAlDisponible = await request("POST", "/api/ventas", {
+        routeKey: "/api/ventas",
+        token: adminToken,
+        body: {
+          fecha: FECHA_COLOMBIA,
+          canal: "punto_venta",
+          clientes_id: clienteId,
+          credito: true,
+          saldo_usado: 6,
+          items: [{ productos_id: productoId, cantidad: 1, precio_unitario: 40 }],
+        },
+      });
+      assertHttp(saldoMayorAlDisponible, 400, "Una venta no puede consumir más saldo a favor del que tiene el cliente");
+      assert.equal(await prisma.ventas.count({ where: { empresas_id: empresaId } }), ventasAntesSaldoExcesivo);
+      assert.equal(await prisma.movimientos_caja.count({ where: { empresas_id: empresaId } }), movimientosCajaAntesSaldoExcesivo);
+      assert.equal(await prisma.saldos_cliente.count({ where: { empresas_id: empresaId, clientes_id: clienteId } }), movimientosSaldoAntesSaldoExcesivo);
+      assert.equal(Number((await prisma.productos.findUnique({ where: { id: productoId }, select: { stock_actual: true } })).stock_actual), stockAntesVenta);
+      assert.equal(await obtenerBalanceCajaVentas(), saldoCajaTrasDeposito);
 
       const venta = await request("POST", "/api/ventas", {
         routeKey: "/api/ventas",
@@ -1347,9 +1605,24 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       const usoSaldoVenta = await prisma.saldos_cliente.findFirst({
         where: { empresas_id: empresaId, clientes_id: clienteId, ventas_id: ventaId, tipo: "uso" },
       });
+      const pagoConSaldo = await prisma.pagos_venta.findFirst({
+        where: { ventas_id: ventaId, nota: "Saldo a favor" },
+      });
       assert.equal(Number(clienteTrasUsarSaldo.saldo_favor), 0);
       assert.ok(usoSaldoVenta);
       assert.equal(Number(usoSaldoVenta.monto), 5);
+      assert.ok(pagoConSaldo);
+      assert.equal(Number(pagoConSaldo.monto), 5);
+      assert.equal(
+        await prisma.movimientos_caja.count({ where: { empresas_id: empresaId, ventas_id: ventaId } }),
+        0,
+        "Usar saldo a favor ya depositado no debe registrar un segundo ingreso en Caja.",
+      );
+      assert.equal(
+        await obtenerBalanceCajaVentas(),
+        saldoCajaTrasDeposito,
+        "La venta cubierta con saldo a favor no debe incrementar Caja por segunda vez.",
+      );
 
       const ventaAntesDePermisosEmpleado = await prisma.ventas.findUnique({
         where: { id: ventaId },
@@ -1589,6 +1862,351 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         body: { monto: 5, nota: "Abono general de suite", fecha: FECHA_COLOMBIA },
       });
       assertHttp(pagoGeneral, 201, "POST /api/deudas/clientes/:clientesId/pagos");
+
+      await testConDiagnostico(tClientes, "Pagos parciales y abono general: FIFO, excedente, devolución y cierre exacto", async () => {
+        const crearClientePagos = await request("POST", "/api/clientes", {
+          routeKey: "/api/clientes",
+          token: adminToken,
+          body: {
+            nombre: `Cliente Pagos Límite ${entorno.runId}`,
+            telefono: "3000000011",
+            notas: "Fixture exclusivo para pagos parciales y excedentes.",
+          },
+        });
+        assertHttp(crearClientePagos, 201, "Crear cliente temporal para límites de pagos");
+        const clientePagosId = crearClientePagos.json?.data?.id;
+        assert.ok(clientePagosId);
+
+        const stockAntesCicloPagos = Number((await prisma.productos.findUnique({
+          where: { id: productoId },
+          select: { stock_actual: true },
+        })).stock_actual);
+        const crearVentaCredito = async (precio, nota) => {
+          const respuesta = await request("POST", "/api/ventas", {
+            routeKey: "/api/ventas",
+            token: adminToken,
+            body: {
+              fecha: FECHA_COLOMBIA,
+              canal: "punto_venta",
+              clientes_id: clientePagosId,
+              credito: true,
+              abono_inicial: 0,
+              items: [{ productos_id: productoId, cantidad: 1, precio_unitario: precio }],
+              notas: nota,
+            },
+          });
+          assertHttp(respuesta, 201, `Crear venta a crédito para ${nota}`);
+          return respuesta.json?.data?.id;
+        };
+
+        const ventaMasAntiguaId = await crearVentaCredito(10, "Deuda antigua para pago FIFO");
+        const ventaMasNuevaId = await crearVentaCredito(20, "Deuda nueva para pago FIFO");
+        assert.ok(ventaMasAntiguaId && ventaMasNuevaId);
+
+        const detalleDeudaAntes = await request("GET", `/api/deudas/clientes/${clientePagosId}`, {
+          routeKey: "/api/deudas/clientes/:clientesId",
+          token: adminToken,
+        });
+        assertHttp(detalleDeudaAntes, 200, "Consultar deudas del cliente antes del abono general");
+        assert.deepEqual(
+          detalleDeudaAntes.json?.data?.ventas?.map(venta => venta.id),
+          [ventaMasAntiguaId, ventaMasNuevaId],
+          "Las deudas deben presentarse de la más antigua a la más reciente.",
+        );
+        assert.equal(Number(detalleDeudaAntes.json?.data?.totalDeuda), 30);
+
+        const balanceCajaAntesPagos = await obtenerBalanceCajaVentas();
+        const abonoGeneralParcial = await request("POST", `/api/deudas/clientes/${clientePagosId}/pagos`, {
+          routeKey: "/api/deudas/clientes/:clientesId/pagos",
+          token: adminToken,
+          body: { monto: 15, nota: "Abono FIFO parcial de suite", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(abonoGeneralParcial, 201, "Abono general parcial distribuido por antigüedad");
+        assert.deepEqual(
+          abonoGeneralParcial.json?.data?.aplicados?.map(item => [item.ventas_id, Number(item.monto), Number(item.saldoRestante), item.estado_pago]),
+          [
+            [ventaMasAntiguaId, 10, 0, "pagada"],
+            [ventaMasNuevaId, 5, 15, "parcial"],
+          ],
+          "El abono general debe pagar primero la deuda más antigua y continuar con la siguiente.",
+        );
+        assert.equal(Number(abonoGeneralParcial.json?.data?.excedente), 0);
+
+        const [ventaAntiguaParcial, ventaNuevaParcial, pagosParciales, cajaParcial, fondoParcial] = await Promise.all([
+          prisma.ventas.findUnique({ where: { id: ventaMasAntiguaId } }),
+          prisma.ventas.findUnique({ where: { id: ventaMasNuevaId } }),
+          prisma.pagos_venta.findMany({
+            where: { ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } },
+            orderBy: [{ ventas_id: "asc" }, { id: "asc" }],
+            select: { id: true, ventas_id: true, monto: true },
+          }),
+          prisma.movimientos_caja.findMany({
+            where: { empresas_id: empresaId, ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "ingreso", categoria: "venta", anulado: false },
+            orderBy: [{ ventas_id: "asc" }, { id: "asc" }],
+            select: { id: true, ventas_id: true, monto: true },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, venta_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "recuperacion", anulado: false },
+            orderBy: [{ venta_id: "asc" }, { id: "asc" }],
+            select: { id: true, venta_id: true, monto_cobrado: true, pago_venta_id: true },
+          }),
+        ]);
+        assert.equal(ventaAntiguaParcial.estado_pago, "pagada");
+        assert.equal(ventaNuevaParcial.estado_pago, "parcial");
+        assert.deepEqual(pagosParciales.map(pago => [pago.ventas_id, Number(pago.monto)]), [
+          [ventaMasAntiguaId, 10],
+          [ventaMasNuevaId, 5],
+        ]);
+        assert.deepEqual(cajaParcial.map(mov => [mov.ventas_id, Number(mov.monto)]), [
+          [ventaMasAntiguaId, 10],
+          [ventaMasNuevaId, 5],
+        ]);
+        assert.equal(fondoParcial.length, 2);
+        assert.equal(Number(fondoParcial.reduce((sum, evento) => sum + Number(evento.monto_cobrado), 0)), 15);
+        assert.ok(fondoParcial.every(evento => pagosParciales.some(pago => pago.id === evento.pago_venta_id && pago.ventas_id === evento.venta_id)));
+        assert.equal(Number((await prisma.clientes.findUnique({ where: { id: clientePagosId }, select: { saldo_favor: true } })).saldo_favor), 0);
+        assert.equal(await obtenerBalanceCajaVentas(), Math.round((balanceCajaAntesPagos + 15) * 100) / 100);
+
+        const pagosAntesExcesoRechazado = await prisma.pagos_venta.findMany({
+          where: { ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } },
+          select: { id: true, ventas_id: true, monto: true },
+          orderBy: { id: "asc" },
+        });
+        const cajaAntesExcesoRechazado = await prisma.movimientos_caja.findMany({
+          where: { empresas_id: empresaId, ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "ingreso", categoria: "venta", anulado: false },
+          select: { id: true, ventas_id: true, monto: true },
+          orderBy: { id: "asc" },
+        });
+        const fondoAntesExcesoRechazado = await prisma.fondo_reposicion_movimientos.findMany({
+          where: { empresas_id: empresaId, venta_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "recuperacion", anulado: false },
+          select: { id: true, venta_id: true, monto_cobrado: true, pago_venta_id: true },
+          orderBy: { id: "asc" },
+        });
+        const excesoSinGuardar = await request("POST", `/api/deudas/clientes/${clientePagosId}/pagos`, {
+          routeKey: "/api/deudas/clientes/:clientesId/pagos",
+          token: adminToken,
+          body: { monto: 20, nota: "Exceso sin autorización de saldo a favor", fecha: FECHA_COLOMBIA, guardar_excedente: false },
+        });
+        assertHttp(excesoSinGuardar, 400, "Un abono general superior a la deuda debe rechazarse si no se permite guardar el excedente");
+        const pagosTrasExcesoRechazado = await prisma.pagos_venta.findMany({
+          where: { ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } },
+          select: { id: true, ventas_id: true, monto: true },
+          orderBy: { id: "asc" },
+        });
+        const cajaTrasExcesoRechazado = await prisma.movimientos_caja.findMany({
+          where: { empresas_id: empresaId, ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "ingreso", categoria: "venta", anulado: false },
+          select: { id: true, ventas_id: true, monto: true },
+          orderBy: { id: "asc" },
+        });
+        const fondoTrasExcesoRechazado = await prisma.fondo_reposicion_movimientos.findMany({
+          where: { empresas_id: empresaId, venta_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "recuperacion", anulado: false },
+          select: { id: true, venta_id: true, monto_cobrado: true, pago_venta_id: true },
+          orderBy: { id: "asc" },
+        });
+        assert.deepEqual(pagosTrasExcesoRechazado.map(row => [row.id, row.ventas_id, Number(row.monto)]), pagosAntesExcesoRechazado.map(row => [row.id, row.ventas_id, Number(row.monto)]));
+        assert.deepEqual(cajaTrasExcesoRechazado.map(row => [row.id, row.ventas_id, Number(row.monto)]), cajaAntesExcesoRechazado.map(row => [row.id, row.ventas_id, Number(row.monto)]));
+        assert.deepEqual(fondoTrasExcesoRechazado.map(row => [row.id, row.venta_id, Number(row.monto_cobrado), row.pago_venta_id]), fondoAntesExcesoRechazado.map(row => [row.id, row.venta_id, Number(row.monto_cobrado), row.pago_venta_id]));
+        assert.equal(Number((await prisma.clientes.findUnique({ where: { id: clientePagosId }, select: { saldo_favor: true } })).saldo_favor), 0);
+        assert.equal(await obtenerBalanceCajaVentas(), Math.round((balanceCajaAntesPagos + 15) * 100) / 100);
+
+        const abonoConExcedente = await request("POST", `/api/deudas/clientes/${clientePagosId}/pagos`, {
+          routeKey: "/api/deudas/clientes/:clientesId/pagos",
+          token: adminToken,
+          body: { monto: 20, nota: "Pago final y excedente autorizado", fecha: FECHA_COLOMBIA, guardar_excedente: true },
+        });
+        assertHttp(abonoConExcedente, 201, "Un excedente autorizado debe pagar la deuda y quedar como saldo a favor");
+        assert.deepEqual(
+          abonoConExcedente.json?.data?.aplicados?.map(item => [item.ventas_id, Number(item.monto), Number(item.saldoRestante), item.estado_pago]),
+          [[ventaMasNuevaId, 15, 0, "pagada"]],
+        );
+        assert.equal(Number(abonoConExcedente.json?.data?.excedente), 5);
+
+        const [ventasPagadas, pagosFinales, cajaVentasFinal, fondoVentasFinal, clienteConExcedente, movimientoExcedente] = await Promise.all([
+          prisma.ventas.findMany({ where: { id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } }, orderBy: { id: "asc" } }),
+          prisma.pagos_venta.findMany({ where: { ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } }, orderBy: { id: "asc" }, select: { id: true, ventas_id: true, monto: true } }),
+          prisma.movimientos_caja.findMany({ where: { empresas_id: empresaId, ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "ingreso", categoria: "venta", anulado: false }, select: { id: true, ventas_id: true, monto: true } }),
+          prisma.fondo_reposicion_movimientos.findMany({ where: { empresas_id: empresaId, venta_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "recuperacion", anulado: false }, select: { id: true, venta_id: true, monto_cobrado: true, pago_venta_id: true } }),
+          prisma.clientes.findUnique({ where: { id: clientePagosId }, select: { saldo_favor: true } }),
+          prisma.movimientos_caja.findMany({ where: { empresas_id: empresaId, clientes_id: clientePagosId, ventas_id: null, tipo: "ingreso", categoria: "otro", anulado: false, descripcion: "Saldo a favor (excedente de abono)" }, select: { id: true, monto: true } }),
+        ]);
+        assert.ok(ventasPagadas.every(venta => venta.estado_pago === "pagada"));
+        assert.equal(pagosFinales.length, 3);
+        assert.equal(Number(pagosFinales.reduce((sum, pago) => sum + Number(pago.monto), 0)), 30);
+        assert.equal(cajaVentasFinal.length, 3);
+        assert.equal(Number(cajaVentasFinal.reduce((sum, mov) => sum + Number(mov.monto), 0)), 30);
+        assert.equal(fondoVentasFinal.length, 3);
+        assert.equal(Number(fondoVentasFinal.reduce((sum, evento) => sum + Number(evento.monto_cobrado), 0)), 30);
+        assert.ok(fondoVentasFinal.every(evento => pagosFinales.some(pago => pago.id === evento.pago_venta_id && pago.ventas_id === evento.venta_id)));
+        assert.equal(Number(clienteConExcedente.saldo_favor), 5);
+        assert.equal(movimientoExcedente.length, 1);
+        assert.equal(Number(movimientoExcedente[0].monto), 5);
+
+        const saldoCajaAntesDevolucionExcedente = await obtenerBalanceCajaVentas();
+        const saldoMovimientosAntesDevolucion = await prisma.saldos_cliente.count({ where: { empresas_id: empresaId, clientes_id: clientePagosId } });
+        const devolucionMayorExcedente = await request("POST", `/api/clientes/${clientePagosId}/saldo/devolucion`, {
+          routeKey: "/api/clientes/:id/saldo/devolucion",
+          token: adminToken,
+          body: { monto: 6, nota: "Devolución mayor al excedente", fecha: FECHA_COLOMBIA, registrar_en_caja: true },
+        });
+        assertHttp(devolucionMayorExcedente, 400, "La devolución no puede superar el saldo a favor disponible");
+        assert.equal(Number((await prisma.clientes.findUnique({ where: { id: clientePagosId }, select: { saldo_favor: true } })).saldo_favor), 5);
+        assert.equal(await prisma.saldos_cliente.count({ where: { empresas_id: empresaId, clientes_id: clientePagosId } }), saldoMovimientosAntesDevolucion);
+        assert.equal(await obtenerBalanceCajaVentas(), saldoCajaAntesDevolucionExcedente);
+
+        const devolverExcedente = await request("POST", `/api/clientes/${clientePagosId}/saldo/devolucion`, {
+          routeKey: "/api/clientes/:id/saldo/devolucion",
+          token: adminToken,
+          body: { monto: 5, nota: "Devolución exacta del excedente", fecha: FECHA_COLOMBIA, registrar_en_caja: true },
+        });
+        assertHttp(devolverExcedente, 201, "Devolver exactamente el saldo a favor restante");
+        assert.equal(Number(devolverExcedente.json?.data?.saldo_favor), 0);
+        assert.equal(await obtenerBalanceCajaVentas(), Math.round((saldoCajaAntesDevolucionExcedente - 5) * 100) / 100);
+        const movimientoDevolucionExcedente = await prisma.movimientos_caja.findFirst({
+          where: { empresas_id: empresaId, clientes_id: clientePagosId, tipo: "gasto", categoria: "otro", anulado: false, descripcion: { contains: "Devolución de saldo" } },
+          orderBy: { id: "desc" },
+        });
+        assert.ok(movimientoDevolucionExcedente);
+        assert.equal(Number(movimientoDevolucionExcedente.monto), 5);
+
+        const pagosAntesAnularVentasGeneral = await prisma.pagos_venta.findMany({
+          where: { ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } },
+          select: { id: true, ventas_id: true, monto: true },
+          orderBy: { id: "asc" },
+        });
+        for (const ventaCreditoId of [ventaMasAntiguaId, ventaMasNuevaId]) {
+          const anularVentaCredito = await request("DELETE", `/api/ventas/${ventaCreditoId}`, {
+            routeKey: "/api/ventas/:id",
+            token: adminToken,
+            body: { motivo: "Cierre del fixture de pagos FIFO" },
+          });
+          assertHttp(anularVentaCredito, 200, "Anular venta temporal del ciclo FIFO");
+        }
+        const [pagosTrasAnularVentasGeneral, cajaTrasAnularVentasGeneral, fondoTrasAnularVentasGeneral] = await Promise.all([
+          prisma.pagos_venta.findMany({
+            where: { ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] } },
+            select: { id: true, ventas_id: true, monto: true },
+            orderBy: { id: "asc" },
+          }),
+          prisma.movimientos_caja.findMany({
+            where: { empresas_id: empresaId, ventas_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "ingreso", categoria: "venta" },
+            select: { id: true, anulado: true },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, venta_id: { in: [ventaMasAntiguaId, ventaMasNuevaId] }, tipo: "recuperacion" },
+            select: { id: true, anulado: true },
+          }),
+        ]);
+        assert.deepEqual(
+          pagosTrasAnularVentasGeneral.map(row => [row.id, row.ventas_id, Number(row.monto)]),
+          pagosAntesAnularVentasGeneral.map(row => [row.id, row.ventas_id, Number(row.monto)]),
+          "Anular ventas liquidadas debe preservar sus pagos históricos.",
+        );
+        assert.ok(cajaTrasAnularVentasGeneral.length > 0 && cajaTrasAnularVentasGeneral.every(row => row.anulado));
+        assert.ok(fondoTrasAnularVentasGeneral.length > 0 && fondoTrasAnularVentasGeneral.every(row => row.anulado));
+        assert.equal(Number((await prisma.productos.findUnique({ where: { id: productoId }, select: { stock_actual: true } })).stock_actual), stockAntesCicloPagos,
+          "Anular las ventas del escenario FIFO debe restaurar exactamente el stock utilizado por sus fixtures.");
+
+        // Un tercer crédito verifica el endpoint de abono individual: parcial, exacto y exceso posterior.
+        const stockAntesPagoIndividual = Number((await prisma.productos.findUnique({
+          where: { id: productoId },
+          select: { stock_actual: true },
+        })).stock_actual);
+        const ventaPagoIndividualId = await crearVentaCredito(12, "Venta para abonos parciales individuales");
+        assert.ok(ventaPagoIndividualId);
+        const pagoParcialIndividual = await request("POST", `/api/deudas/${ventaPagoIndividualId}/pagos`, {
+          routeKey: "/api/deudas/:ventaId/pagos",
+          token: adminToken,
+          body: { monto: 4, nota: "Primer abono parcial individual", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(pagoParcialIndividual, 201, "Registrar primer abono parcial individual");
+        let ventaPagoIndividual = await prisma.ventas.findUnique({ where: { id: ventaPagoIndividualId }, include: { pagos_venta: true } });
+        assert.equal(ventaPagoIndividual.estado_pago, "parcial");
+        assert.equal(Number(ventaPagoIndividual.pagos_venta.reduce((sum, pago) => sum + Number(pago.monto), 0)), 4);
+        assert.equal(Number(ventaPagoIndividual.total) - 4, 8);
+
+        const pagosAntesExcesoIndividual = await prisma.pagos_venta.findMany({ where: { ventas_id: ventaPagoIndividualId }, select: { id: true, monto: true } });
+        const cajaAntesExcesoIndividual = await prisma.movimientos_caja.findMany({ where: { empresas_id: empresaId, ventas_id: ventaPagoIndividualId, tipo: "ingreso", categoria: "venta", anulado: false }, select: { id: true, monto: true } });
+        const fondoAntesExcesoIndividual = await prisma.fondo_reposicion_movimientos.findMany({ where: { empresas_id: empresaId, venta_id: ventaPagoIndividualId, tipo: "recuperacion", anulado: false }, select: { id: true, monto_cobrado: true, pago_venta_id: true } });
+        const excederSaldoIndividual = await request("POST", `/api/deudas/${ventaPagoIndividualId}/pagos`, {
+          routeKey: "/api/deudas/:ventaId/pagos",
+          token: adminToken,
+          body: { monto: 9, nota: "Abono individual superior al saldo restante", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(excederSaldoIndividual, 400, "Un abono individual no puede superar el saldo pendiente");
+        assert.deepEqual(
+          (await prisma.pagos_venta.findMany({ where: { ventas_id: ventaPagoIndividualId }, select: { id: true, monto: true } })).map(row => [row.id, Number(row.monto)]),
+          pagosAntesExcesoIndividual.map(row => [row.id, Number(row.monto)]),
+        );
+        assert.deepEqual(
+          (await prisma.movimientos_caja.findMany({ where: { empresas_id: empresaId, ventas_id: ventaPagoIndividualId, tipo: "ingreso", categoria: "venta", anulado: false }, select: { id: true, monto: true } })).map(row => [row.id, Number(row.monto)]),
+          cajaAntesExcesoIndividual.map(row => [row.id, Number(row.monto)]),
+        );
+        assert.deepEqual(
+          (await prisma.fondo_reposicion_movimientos.findMany({ where: { empresas_id: empresaId, venta_id: ventaPagoIndividualId, tipo: "recuperacion", anulado: false }, select: { id: true, monto_cobrado: true, pago_venta_id: true } })).map(row => [row.id, Number(row.monto_cobrado), row.pago_venta_id]),
+          fondoAntesExcesoIndividual.map(row => [row.id, Number(row.monto_cobrado), row.pago_venta_id]),
+        );
+
+        const pagarSaldoExacto = await request("POST", `/api/deudas/${ventaPagoIndividualId}/pagos`, {
+          routeKey: "/api/deudas/:ventaId/pagos",
+          token: adminToken,
+          body: { monto: 8, nota: "Pago exacto del saldo final", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(pagarSaldoExacto, 201, "El abono exacto del saldo debe cerrar la deuda");
+        ventaPagoIndividual = await prisma.ventas.findUnique({ where: { id: ventaPagoIndividualId }, include: { pagos_venta: true } });
+        assert.equal(ventaPagoIndividual.estado_pago, "pagada");
+        assert.equal(Number(ventaPagoIndividual.pagos_venta.reduce((sum, pago) => sum + Number(pago.monto), 0)), 12);
+        const [cajaIndividualPagada, fondoIndividualPagada] = await Promise.all([
+          prisma.movimientos_caja.findMany({
+            where: { empresas_id: empresaId, ventas_id: ventaPagoIndividualId, tipo: "ingreso", categoria: "venta", anulado: false },
+            select: { id: true, monto: true },
+            orderBy: { id: "asc" },
+          }),
+          prisma.fondo_reposicion_movimientos.findMany({
+            where: { empresas_id: empresaId, venta_id: ventaPagoIndividualId, tipo: "recuperacion", anulado: false },
+            select: { id: true, monto_cobrado: true, pago_venta_id: true },
+            orderBy: { id: "asc" },
+          }),
+        ]);
+        assert.equal(cajaIndividualPagada.length, 2);
+        assert.equal(Number(cajaIndividualPagada.reduce((sum, row) => sum + Number(row.monto), 0)), 12);
+        assert.equal(fondoIndividualPagada.length, 2);
+        assert.equal(Number(fondoIndividualPagada.reduce((sum, row) => sum + Number(row.monto_cobrado), 0)), 12);
+        assert.ok(fondoIndividualPagada.every(evento => ventaPagoIndividual.pagos_venta.some(pago => pago.id === evento.pago_venta_id)));
+
+        const pagoPosteriorVentaPagada = await request("POST", `/api/deudas/${ventaPagoIndividualId}/pagos`, {
+          routeKey: "/api/deudas/:ventaId/pagos",
+          token: adminToken,
+          body: { monto: 1, nota: "Intento de pago después de liquidar", fecha: FECHA_COLOMBIA },
+        });
+        assertHttp(pagoPosteriorVentaPagada, 400, "Una venta pagada no debe admitir abonos adicionales");
+        ventaPagoIndividual = await prisma.ventas.findUnique({ where: { id: ventaPagoIndividualId }, include: { pagos_venta: true } });
+        assert.equal(ventaPagoIndividual.pagos_venta.length, 2);
+        assert.equal(Number(ventaPagoIndividual.pagos_venta.reduce((sum, pago) => sum + Number(pago.monto), 0)), 12);
+        assert.equal(await prisma.movimientos_caja.count({ where: { empresas_id: empresaId, ventas_id: ventaPagoIndividualId, tipo: "ingreso", categoria: "venta", anulado: false } }), 2);
+        assert.equal(await prisma.fondo_reposicion_movimientos.count({ where: { empresas_id: empresaId, venta_id: ventaPagoIndividualId, tipo: "recuperacion", anulado: false } }), 2);
+
+        const pagosIndividualAntesAnulacion = ventaPagoIndividual.pagos_venta.map(pago => [pago.id, Number(pago.monto)]);
+        const anularVentaPagoIndividual = await request("DELETE", `/api/ventas/${ventaPagoIndividualId}`, {
+          routeKey: "/api/ventas/:id",
+          token: adminToken,
+          body: { motivo: "Cierre del fixture de abonos parciales individuales" },
+        });
+        assertHttp(anularVentaPagoIndividual, 200, "Anular venta temporal de abonos individuales");
+        const ventaPagoIndividualAnulada = await prisma.ventas.findUnique({
+          where: { id: ventaPagoIndividualId },
+          include: { pagos_venta: true },
+        });
+        assert.equal(ventaPagoIndividualAnulada.anulada, true);
+        assert.deepEqual(
+          ventaPagoIndividualAnulada.pagos_venta.map(pago => [pago.id, Number(pago.monto)]),
+          pagosIndividualAntesAnulacion,
+          "La anulación del fixture no debe borrar los dos abonos individuales.",
+        );
+        assert.equal(await prisma.movimientos_caja.count({ where: { empresas_id: empresaId, ventas_id: ventaPagoIndividualId, tipo: "ingreso", categoria: "venta", anulado: false } }), 0);
+        assert.equal(await prisma.fondo_reposicion_movimientos.count({ where: { empresas_id: empresaId, venta_id: ventaPagoIndividualId, tipo: "recuperacion", anulado: false } }), 0);
+        assert.equal(Number((await prisma.productos.findUnique({ where: { id: productoId }, select: { stock_actual: true } })).stock_actual), stockAntesPagoIndividual,
+          "Anular la venta pagada debe restaurar el stock temporal.");
+      });
 
       await testConDiagnostico(tClientes, "Editar venta con abonos conserva pagos y recalcula Fondo; total menor a lo recibido se rechaza", async () => {
         const ventaAntes = await prisma.ventas.findUnique({

@@ -82,3 +82,10 @@ node --test tests/watchdog.selftest.js
 ```
 
 Esta autoprueba simula una fase pausada con una petición HTTP y una operación Prisma pendientes. Usa intervalos reducidos solo en memoria, captura la salida del watchdog y verifica que reporte la fase, HTTP, Prisma, estado simulado de la API y alerta. No importa el cliente Prisma ni crea fixtures.
+
+
+## Casos límite de saldos y pagos
+
+La suite cubre también los bordes financieros de clientes y ventas: rechaza depósitos negativos/cero y devoluciones que superan el saldo disponible sin crear movimientos; comprueba que `registrar_en_caja=false` no afecte Caja; evita contar dos veces como ingreso el saldo a favor aplicado a una venta; distribuye abonos generales desde la deuda más antigua; rechaza excedentes no autorizados y registra el excedente autorizado como saldo a favor; verifica la devolución de ese excedente y el efecto de Caja; y prueba abonos individuales parciales, pago exacto del saldo y rechazo de nuevos abonos cuando la venta ya está pagada.
+
+La recuperación histórica verifica el aislamiento por empresa, el enlace de la entrada de inventario existente sin duplicarla ni modificar stock, la idempotencia al repetir la recuperación y el rechazo de registros sin entradas verificables sin crear detalles ni alterar el evento incompleto del Fondo. Todos los registros de estos escenarios pertenecen a fixtures de la empresa temporal y se eliminan al cerrar la suite.
