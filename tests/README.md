@@ -89,3 +89,12 @@ Esta autoprueba simula una fase pausada con una petición HTTP y una operación 
 La suite cubre también los bordes financieros de clientes y ventas: rechaza depósitos negativos/cero y devoluciones que superan el saldo disponible sin crear movimientos; comprueba que `registrar_en_caja=false` no afecte Caja; evita contar dos veces como ingreso el saldo a favor aplicado a una venta; distribuye abonos generales desde la deuda más antigua; rechaza excedentes no autorizados y registra el excedente autorizado como saldo a favor; verifica la devolución de ese excedente y el efecto de Caja; y prueba abonos individuales parciales, pago exacto del saldo y rechazo de nuevos abonos cuando la venta ya está pagada.
 
 La recuperación histórica verifica el aislamiento por empresa, el enlace de la entrada de inventario existente sin duplicarla ni modificar stock, la idempotencia al repetir la recuperación y el rechazo de registros sin entradas verificables sin crear detalles ni alterar el evento incompleto del Fondo. Todos los registros de estos escenarios pertenecen a fixtures de la empresa temporal y se eliminan al cerrar la suite.
+
+
+## Integridad de inventario y producción
+
+Los casos de inventario verifican que una base conciliada no pueda alterarse mediante cambios manuales de stock o costo, que un ajuste sin diferencia no genere movimientos y que las conciliaciones inválidas no cambien la base histórica ni creen registros.
+
+Los casos de producción verifican consumos reales frente a receta, agregación de consumos repetidos del mismo insumo, aceptación de cantidades cero sin movimiento y rechazo de cantidades con más de tres decimales, consumos totalmente en cero, insumos de otra empresa o cantidades superiores al stock. También comprueban que el rechazo no cree lotes ni mueva inventario.
+
+En ciclos válidos se comparan stock de producto e insumo, salidas históricas, costo total y unitario, costo promedio del producto y snapshots de ediciones. La edición sustituye el consumo activo sin borrar su historial; una edición rechazada por falta de insumo debe revertir todos los cambios intermedios; la anulación restaura el inventario y cambia el estado del costo histórico. Para productos sin receta, se comprueba que se use el costo manual y que `insumos_reales` no provoque consumos. Todos los escenarios usan recursos temporales de la empresa de pruebas.

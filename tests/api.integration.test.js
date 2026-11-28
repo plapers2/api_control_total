@@ -422,7 +422,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(perfilDesbloqueado, 200, "GET /api/auth/me después de cambiar contraseña");
     });
 
-    await testConDiagnostico(t, "Productos e insumos: alta, ajustes, conciliación y receta", async () => {
+    await testConDiagnostico(t, "Productos e insumos: alta, ajustes, conciliación y receta", async (tInventario) => {
       const insumosIniciales = await request("GET", "/api/insumos", {
         routeKey: "/api/insumos",
         token: adminToken,
@@ -496,6 +496,87 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         body: { stock_real: 9, valor_total: 90, motivo: "Conciliación controlada de suite" },
       });
       assertHttp(conciliacion, 201, "POST /api/insumos/:id/conciliacion");
+
+      await testConDiagnostico(tInventario, "La base conciliada impide cambios manuales y los ajustes sin diferencia no crean movimientos", async () => {
+        const antes = await prisma.insumos.findUnique({
+          where: { id: insumoId },
+          select: {
+            stock_actual: true,
+            precio_unidad: true,
+            stock_base: true,
+            valor_base: true,
+            movimiento_base_id: true,
+            estado_costo: true,
+          },
+        });
+        const movimientosAntes = await prisma.movimientos_insumos.count({ where: { insumos_id: insumoId } });
+        const conciliacionesAntes = await prisma.conciliaciones_insumos.count({ where: { insumos_id: insumoId } });
+
+        const ajusteSinDiferencia = await request("POST", `/api/insumos/${insumoId}/ajuste`, {
+          routeKey: "/api/insumos/:id/ajuste",
+          token: adminToken,
+          body: { stock_real: 9, motivo: "Conteo sin diferencia de la suite" },
+        });
+        assertHttp(ajusteSinDiferencia, 200, "Ajuste de insumo sin diferencia");
+        assert.equal(ajusteSinDiferencia.json?.data?.sinCambios, true);
+
+        const ajustePrecisionInvalida = await request("POST", `/api/insumos/${insumoId}/ajuste`, {
+          routeKey: "/api/insumos/:id/ajuste",
+          token: adminToken,
+          body: { stock_real: 9.0001, motivo: "Precisión superior a tres decimales" },
+        });
+        assertHttp(ajustePrecisionInvalida, 400, "Ajuste con más de tres decimales");
+
+        const conciliarCeroConValor = await request("POST", `/api/insumos/${insumoId}/conciliacion`, {
+          routeKey: "/api/insumos/:id/conciliacion",
+          token: adminToken,
+          body: { stock_real: 0, valor_total: 10, motivo: "Inventario cero con valor inválido" },
+        });
+        assertHttp(conciliarCeroConValor, 400, "Conciliación de stock cero con valor positivo");
+
+        const conciliarStockSinValor = await request("POST", `/api/insumos/${insumoId}/conciliacion`, {
+          routeKey: "/api/insumos/:id/conciliacion",
+          token: adminToken,
+          body: { stock_real: 9, valor_total: 0, motivo: "Inventario positivo sin valor verificable" },
+        });
+        assertHttp(conciliarStockSinValor, 400, "Conciliación con stock positivo y valor cero");
+
+        const cambioManualStock = await request("PUT", `/api/insumos/${insumoId}`, {
+          routeKey: "/api/insumos/:id",
+          token: adminToken,
+          body: { stock_actual: 8 },
+        });
+        assertHttp(cambioManualStock, 400, "Impedir cambio manual de stock después de conciliar");
+
+        const cambioManualCosto = await request("PUT", `/api/insumos/${insumoId}`, {
+          routeKey: "/api/insumos/:id",
+          token: adminToken,
+          body: { precio_unidad: 20 },
+        });
+        assertHttp(cambioManualCosto, 400, "Impedir cambio manual de costo después de conciliar");
+
+        const despues = await prisma.insumos.findUnique({
+          where: { id: insumoId },
+          select: {
+            stock_actual: true,
+            precio_unidad: true,
+            stock_base: true,
+            valor_base: true,
+            movimiento_base_id: true,
+            estado_costo: true,
+          },
+        });
+        assert.equal(Number(despues.stock_actual), Number(antes.stock_actual));
+        assert.equal(Number(despues.precio_unidad), Number(antes.precio_unidad));
+        assert.equal(Number(despues.stock_base), Number(antes.stock_base));
+        assert.equal(Number(despues.valor_base), Number(antes.valor_base));
+        assert.equal(despues.movimiento_base_id, antes.movimiento_base_id);
+        assert.equal(despues.estado_costo, antes.estado_costo);
+        assert.equal(await prisma.movimientos_insumos.count({ where: { insumos_id: insumoId } }), movimientosAntes,
+          "Las operaciones inválidas y el ajuste sin diferencia no deben crear movimientos.");
+        assert.equal(await prisma.conciliaciones_insumos.count({ where: { insumos_id: insumoId } }), conciliacionesAntes,
+          "Las conciliaciones rechazadas no deben crear historial.");
+      });
 
       const conciliaciones = await request("GET", `/api/insumos/${insumoId}/conciliaciones`, {
         routeKey: "/api/insumos/:id/conciliaciones",
@@ -1230,7 +1311,7 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       );
     });
 
-    await testConDiagnostico(t, "Producción: crear, consultar, editar y anular lotes", async () => {
+    await testConDiagnostico(t, "Producción: crear, consultar, editar y anular lotes", async (tProduccion) => {
       const lista = await request("GET", "/api/produccion?page=1&limit=20", {
         routeKey: "/api/produccion",
         token: adminToken,
@@ -1266,41 +1347,263 @@ test("Suite integral de endpoints de Control Total", async (t) => {
         Number(stockProductoAjenoAntesProduccion.stock_actual),
       );
 
-      const crearLote = await request("POST", "/api/produccion", {
+      const productoAntesDeProduccion = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+      });
+      const insumoAntesDeProduccion = await prisma.insumos.findUnique({
+        where: { id: insumoId },
+        select: { stock_actual: true, precio_unidad: true },
+      });
+      const lotesAntesDeConsumosInvalidos = await prisma.lotes_produccion.count({ where: { empresas_id: empresaId } });
+      const movimientosAntesDeConsumosInvalidos = await prisma.movimientos_insumos.count({ where: { insumos_id: insumoId } });
+
+      const produccionPrecisionInvalida = await request("POST", "/api/produccion", {
         routeKey: "/api/produccion",
         token: adminToken,
         body: {
           fecha: FECHA_COLOMBIA,
-          notas: "Lote temporal de prueba de creación y edición",
           items: [{ productos_id: productoId, cantidad: 2 }],
+          insumos_reales: [{ insumos_id: insumoId, cantidad: 0.0001 }],
         },
       });
-      assertHttp(crearLote, 201, "POST /api/produccion");
-      loteAnuladoId = crearLote.json?.data?.id;
-      assert.ok(loteAnuladoId);
+      assertHttp(produccionPrecisionInvalida, 400, "Producción con consumo de insumo de cuatro decimales");
 
-      const detalle = await request("GET", `/api/produccion/${loteAnuladoId}`, {
-        routeKey: "/api/produccion/:id",
-        token: adminToken,
-      });
-      assertHttp(detalle, 200, "GET /api/produccion/:id");
-
-      const editarLote = await request("PUT", `/api/produccion/${loteAnuladoId}`, {
-        routeKey: "/api/produccion/:id",
+      const produccionSinConsumoPositivo = await request("POST", "/api/produccion", {
+        routeKey: "/api/produccion",
         token: adminToken,
         body: {
-          notas: "Lote temporal editado por suite",
-          items: [{ productos_id: productoId, cantidad: 3 }],
+          fecha: FECHA_COLOMBIA,
+          items: [{ productos_id: productoId, cantidad: 2 }],
+          insumos_reales: [{ insumos_id: insumoId, cantidad: 0 }],
         },
       });
-      assertHttp(editarLote, 200, "PUT /api/produccion/:id");
+      assertHttp(produccionSinConsumoPositivo, 400, "Producción con todos los consumos reales en cero");
 
-      const anularLote = await request("DELETE", `/api/produccion/${loteAnuladoId}`, {
-        routeKey: "/api/produccion/:id",
+      const produccionConInsumoAjeno = await request("POST", "/api/produccion", {
+        routeKey: "/api/produccion",
         token: adminToken,
-        body: { motivo: "Anulación de lote temporal de suite" },
+        body: {
+          fecha: FECHA_COLOMBIA,
+          items: [{ productos_id: productoId, cantidad: 2 }],
+          insumos_reales: [{ insumos_id: insumoAjenoId, cantidad: 0.1 }],
+        },
       });
-      assertHttp(anularLote, 200, "DELETE /api/produccion/:id");
+      assertHttp(produccionConInsumoAjeno, 400, "Producción con consumo real de insumo de otra empresa");
+
+      const produccionSinStockInsumo = await request("POST", "/api/produccion", {
+        routeKey: "/api/produccion",
+        token: adminToken,
+        body: {
+          fecha: FECHA_COLOMBIA,
+          items: [{ productos_id: productoId, cantidad: 2 }],
+          insumos_reales: [{ insumos_id: insumoId, cantidad: 999 }],
+        },
+      });
+      assertHttp(produccionSinStockInsumo, 400, "Producción con consumo real superior al stock disponible");
+
+      assert.equal(
+        await prisma.lotes_produccion.count({ where: { empresas_id: empresaId } }),
+        lotesAntesDeConsumosInvalidos,
+        "Los consumos inválidos no deben crear lotes de producción.",
+      );
+      assert.equal(
+        await prisma.movimientos_insumos.count({ where: { insumos_id: insumoId } }),
+        movimientosAntesDeConsumosInvalidos,
+        "Los consumos inválidos no deben generar movimientos de inventario.",
+      );
+      assert.equal(
+        Number((await prisma.insumos.findUnique({ where: { id: insumoId }, select: { stock_actual: true } })).stock_actual),
+        Number(insumoAntesDeProduccion.stock_actual),
+      );
+      assert.equal(
+        Number((await prisma.productos.findUnique({ where: { id: productoId }, select: { stock_actual: true } })).stock_actual),
+        Number(productoAntesDeProduccion.stock_actual),
+      );
+
+      await testConDiagnostico(tProduccion, "Producción con receta y consumos reales agrega cantidades duplicadas y conserva snapshots de edición", async () => {
+        const stockProductoInicial = Number(productoAntesDeProduccion.stock_actual);
+        const stockInsumoInicial = Number(insumoAntesDeProduccion.stock_actual);
+        const crearLote = await request("POST", "/api/produccion", {
+          routeKey: "/api/produccion",
+          token: adminToken,
+          body: {
+            fecha: FECHA_COLOMBIA,
+            notas: "Lote temporal con consumos reales agregados por suite",
+            items: [{ productos_id: productoId, cantidad: 2 }],
+            insumos_reales: [
+              { insumos_id: insumoId, cantidad: 0.1 },
+              { insumos_id: insumoId, cantidad: 0.15 },
+              { insumos_id: insumoId, cantidad: 0 },
+            ],
+          },
+        });
+        assertHttp(crearLote, 201, "POST /api/produccion");
+        loteAnuladoId = crearLote.json?.data?.id;
+        assert.ok(loteAnuladoId);
+
+        const loteCreado = await prisma.lotes_produccion.findUnique({
+          where: { id: loteAnuladoId },
+          include: { lotes_produccion_items: true },
+        });
+        const movimientosLoteCreado = await prisma.movimientos_insumos.findMany({
+          where: { lotes_produccion_id: loteAnuladoId },
+          orderBy: { id: "asc" },
+        });
+        const edicionesLoteCreado = await prisma.lotes_produccion_ediciones.findMany({
+          where: { lote_id: loteAnuladoId },
+          orderBy: { numero_edicion: "asc" },
+        });
+        assert.equal(Number(loteCreado.costo_total), 2.5);
+        assert.equal(Number(loteCreado.lotes_produccion_items[0].cantidad), 2);
+        assert.equal(Number(loteCreado.lotes_produccion_items[0].costo_unitario), 1.25);
+        assert.equal(movimientosLoteCreado.length, 1, "Los consumos duplicados del mismo insumo deben consolidarse en un movimiento.");
+        assert.equal(movimientosLoteCreado[0].tipo, "salida");
+        assert.equal(Number(movimientosLoteCreado[0].cantidad), 0.25);
+        assert.equal(Number(movimientosLoteCreado[0].costo_total), 2.5);
+        assert.equal(movimientosLoteCreado[0].anulado, false);
+        assert.equal(Number((await prisma.insumos.findUnique({ where: { id: insumoId }, select: { stock_actual: true } })).stock_actual), stockInsumoInicial - 0.25);
+        const productoTrasCrearLote = await prisma.productos.findUnique({
+          where: { id: productoId },
+          select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+        });
+        assert.equal(Number(productoTrasCrearLote.stock_actual), stockProductoInicial + 2);
+        assert.equal(Number(productoTrasCrearLote.costo_promedio), 1.25);
+        assert.equal(productoTrasCrearLote.costo_promedio_estado, "historico_calculado");
+        assert.equal(edicionesLoteCreado.length, 1);
+        assert.equal(edicionesLoteCreado[0].tipo_registro, "original");
+        assert.equal(Number(edicionesLoteCreado[0].insumos_snapshot[0].cantidad), 0.25);
+
+        const detalle = await request("GET", `/api/produccion/${loteAnuladoId}`, {
+          routeKey: "/api/produccion/:id",
+          token: adminToken,
+        });
+        assertHttp(detalle, 200, "GET /api/produccion/:id");
+
+        const editarLote = await request("PUT", `/api/produccion/${loteAnuladoId}`, {
+          routeKey: "/api/produccion/:id",
+          token: adminToken,
+          body: {
+            notas: "Lote temporal editado por suite",
+            items: [{ productos_id: productoId, cantidad: 3 }],
+          },
+        });
+        assertHttp(editarLote, 200, "PUT /api/produccion/:id");
+
+        const movimientosTrasEdicion = await prisma.movimientos_insumos.findMany({
+          where: { lotes_produccion_id: loteAnuladoId },
+          orderBy: { id: "asc" },
+        });
+        const edicionesTrasEdicion = await prisma.lotes_produccion_ediciones.findMany({
+          where: { lote_id: loteAnuladoId },
+          orderBy: { numero_edicion: "asc" },
+        });
+        const loteTrasEdicion = await prisma.lotes_produccion.findUnique({
+          where: { id: loteAnuladoId },
+          include: { lotes_produccion_items: true },
+        });
+        assert.equal(Number(loteTrasEdicion.costo_total), 3);
+        assert.equal(Number(loteTrasEdicion.lotes_produccion_items[0].cantidad), 3);
+        assert.equal(Number(loteTrasEdicion.lotes_produccion_items[0].costo_unitario), 1);
+        assert.equal(movimientosTrasEdicion.length, 2);
+        assert.equal(movimientosTrasEdicion[0].anulado, true, "El consumo anterior debe conservarse anulado en el historial.");
+        assert.equal(Number(movimientosTrasEdicion[0].cantidad), 0.25);
+        assert.equal(movimientosTrasEdicion[1].anulado, false);
+        assert.equal(Number(movimientosTrasEdicion[1].cantidad), 0.3, "Al editar sin insumos_reales debe aplicarse la receta vigente.");
+        assert.equal(Number((await prisma.insumos.findUnique({ where: { id: insumoId }, select: { stock_actual: true } })).stock_actual), stockInsumoInicial - 0.3);
+        const productoTrasEditarLote = await prisma.productos.findUnique({
+          where: { id: productoId },
+          select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+        });
+        assert.equal(Number(productoTrasEditarLote.stock_actual), stockProductoInicial + 3);
+        assert.equal(Number(productoTrasEditarLote.costo_promedio), 1);
+        assert.equal(productoTrasEditarLote.costo_promedio_estado, "historico_calculado");
+        assert.equal(edicionesTrasEdicion.length, 2);
+        assert.equal(edicionesTrasEdicion[0].estado, "reemplazada");
+        assert.equal(Number(edicionesTrasEdicion[0].insumos_snapshot[0].cantidad), 0.25);
+        assert.equal(edicionesTrasEdicion[1].estado, "vigente");
+        assert.equal(Number(edicionesTrasEdicion[1].insumos_snapshot[0].cantidad), 0.3);
+
+        const loteAntesDeEdicionRechazada = await prisma.lotes_produccion.findUnique({
+          where: { id: loteAnuladoId },
+          include: { lotes_produccion_items: true },
+        });
+        const stockInsumoAntesDeEdicionRechazada = Number((await prisma.insumos.findUnique({
+          where: { id: insumoId }, select: { stock_actual: true },
+        })).stock_actual);
+        const stockProductoAntesDeEdicionRechazada = Number((await prisma.productos.findUnique({
+          where: { id: productoId }, select: { stock_actual: true },
+        })).stock_actual);
+        const movimientosAntesDeEdicionRechazada = await prisma.movimientos_insumos.findMany({
+          where: { lotes_produccion_id: loteAnuladoId },
+          orderBy: { id: "asc" },
+        });
+
+        const editarLoteSinInsumoSuficiente = await request("PUT", `/api/produccion/${loteAnuladoId}`, {
+          routeKey: "/api/produccion/:id",
+          token: adminToken,
+          body: {
+            notas: "Esta edición debe revertirse por falta de insumo",
+            items: [{ productos_id: productoId, cantidad: 4 }],
+            insumos_reales: [{ insumos_id: insumoId, cantidad: 999 }],
+          },
+        });
+        assertHttp(editarLoteSinInsumoSuficiente, 400, "Editar lote con consumo de insumo superior al stock");
+
+        const loteTrasEdicionRechazada = await prisma.lotes_produccion.findUnique({
+          where: { id: loteAnuladoId },
+          include: { lotes_produccion_items: true },
+        });
+        const movimientosTrasEdicionRechazada = await prisma.movimientos_insumos.findMany({
+          where: { lotes_produccion_id: loteAnuladoId },
+          orderBy: { id: "asc" },
+        });
+        assert.equal(Number(loteTrasEdicionRechazada.costo_total), Number(loteAntesDeEdicionRechazada.costo_total));
+        assert.equal(Number(loteTrasEdicionRechazada.lotes_produccion_items[0].cantidad), Number(loteAntesDeEdicionRechazada.lotes_produccion_items[0].cantidad));
+        assert.deepEqual(movimientosTrasEdicionRechazada.map(m => [m.id, m.anulado, Number(m.cantidad)]),
+          movimientosAntesDeEdicionRechazada.map(m => [m.id, m.anulado, Number(m.cantidad)]));
+        assert.equal(Number((await prisma.insumos.findUnique({ where: { id: insumoId }, select: { stock_actual: true } })).stock_actual), stockInsumoAntesDeEdicionRechazada);
+        assert.equal(Number((await prisma.productos.findUnique({ where: { id: productoId }, select: { stock_actual: true } })).stock_actual), stockProductoAntesDeEdicionRechazada);
+
+        const anularLote = await request("DELETE", `/api/produccion/${loteAnuladoId}`, {
+          routeKey: "/api/produccion/:id",
+          token: adminToken,
+          body: { motivo: "Anulación de lote temporal de suite" },
+        });
+        assertHttp(anularLote, 200, "DELETE /api/produccion/:id");
+
+        const loteAnulado = await prisma.lotes_produccion.findUnique({
+          where: { id: loteAnuladoId },
+          select: { anulado: true, motivo_anulacion: true },
+        });
+        const movimientosTrasAnularLote = await prisma.movimientos_insumos.findMany({
+          where: { lotes_produccion_id: loteAnuladoId },
+          orderBy: { id: "asc" },
+        });
+        const edicionesTrasAnularLote = await prisma.lotes_produccion_ediciones.findMany({
+          where: { lote_id: loteAnuladoId },
+          orderBy: { numero_edicion: "asc" },
+        });
+        const insumoTrasAnularLote = await prisma.insumos.findUnique({
+          where: { id: insumoId },
+          select: { stock_actual: true },
+        });
+        const productoTrasAnularLote = await prisma.productos.findUnique({
+          where: { id: productoId },
+          select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+        });
+        assert.equal(loteAnulado.anulado, true);
+        assert.equal(loteAnulado.motivo_anulacion, "Anulación de lote temporal de suite");
+        assert.ok(movimientosTrasAnularLote.every(m => m.anulado), "La anulación debe invalidar todos los consumos del lote.");
+        assert.equal(Number(insumoTrasAnularLote.stock_actual), stockInsumoInicial,
+          "Anular la producción debe devolver exactamente los insumos consumidos.");
+        assert.equal(Number(productoTrasAnularLote.stock_actual), stockProductoInicial,
+          "Anular la producción debe retirar exactamente las unidades producidas.");
+        assert.equal(productoTrasAnularLote.costo_promedio, null);
+        assert.equal(productoTrasAnularLote.costo_promedio_estado, "sin_costo_verificable");
+        assert.equal(edicionesTrasAnularLote[0].estado, "reemplazada");
+        assert.equal(edicionesTrasAnularLote[1].estado, "anulada");
+      });
 
       const crearLoteVenta = await request("POST", "/api/produccion", {
         token: adminToken,
@@ -1313,6 +1616,108 @@ test("Suite integral de endpoints de Control Total", async (t) => {
       assertHttp(crearLoteVenta, 201, "Crear lote de producción para venta");
       loteActivoId = crearLoteVenta.json?.data?.id;
       assert.ok(loteActivoId);
+      const loteActivo = await prisma.lotes_produccion.findUnique({
+        where: { id: loteActivoId },
+        include: { lotes_produccion_items: true },
+      });
+      const productoConLoteActivo = await prisma.productos.findUnique({
+        where: { id: productoId },
+        select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+      });
+      const insumoConLoteActivo = await prisma.insumos.findUnique({
+        where: { id: insumoId },
+        select: { stock_actual: true },
+      });
+      const movimientosLoteActivo = await prisma.movimientos_insumos.findMany({
+        where: { lotes_produccion_id: loteActivoId },
+      });
+      assert.equal(Number(loteActivo.costo_total), 6);
+      assert.equal(Number(loteActivo.lotes_produccion_items[0].costo_unitario), 1);
+      assert.equal(Number(productoConLoteActivo.stock_actual), Number(productoAntesDeProduccion.stock_actual) + 6);
+      assert.equal(Number(productoConLoteActivo.costo_promedio), 1);
+      assert.equal(productoConLoteActivo.costo_promedio_estado, "historico_calculado");
+      assert.equal(Number(insumoConLoteActivo.stock_actual), Number(insumoAntesDeProduccion.stock_actual) - 0.6);
+      assert.equal(movimientosLoteActivo.length, 1);
+      assert.equal(Number(movimientosLoteActivo[0].cantidad), 0.6);
+      assert.equal(Number(movimientosLoteActivo[0].costo_total), 6);
+
+      await testConDiagnostico(tProduccion, "Producto sin receta usa costo manual e ignora consumos reales", async () => {
+        const productoManual = await request("POST", "/api/productos", {
+          routeKey: "/api/productos",
+          token: adminToken,
+          body: {
+            nombre: `Producto costo manual ${entorno.runId}`,
+            descripcion: "Fixture de producción sin receta.",
+            precio_venta: 55,
+          },
+        });
+        assertHttp(productoManual, 201, "Crear producto sin receta para costo manual");
+        const productoManualId = productoManual.json?.data?.id;
+        assert.ok(productoManualId);
+
+        const stockInsumoAntesManual = Number((await prisma.insumos.findUnique({
+          where: { id: insumoId }, select: { stock_actual: true },
+        })).stock_actual);
+        const movimientosInsumoAntesManual = await prisma.movimientos_insumos.count({ where: { insumos_id: insumoId } });
+        const lotesAntesCostoManual = await prisma.lotes_produccion.count({ where: { empresas_id: empresaId } });
+
+        const costoManualNegativo = await request("POST", "/api/produccion", {
+          routeKey: "/api/produccion",
+          token: adminToken,
+          body: {
+            fecha: FECHA_COLOMBIA,
+            items: [{ productos_id: productoManualId, cantidad: 2, costo_total: -1 }],
+          },
+        });
+        assertHttp(costoManualNegativo, 400, "Producción manual con costo negativo");
+        assert.equal(await prisma.lotes_produccion.count({ where: { empresas_id: empresaId } }), lotesAntesCostoManual);
+
+        const loteManual = await request("POST", "/api/produccion", {
+          routeKey: "/api/produccion",
+          token: adminToken,
+          body: {
+            fecha: FECHA_COLOMBIA,
+            notas: "Producción sin receta con costo manual",
+            items: [{ productos_id: productoManualId, cantidad: 2, costo_total: 30 }],
+            insumos_reales: [{ insumos_id: insumoId, cantidad: 1 }],
+          },
+        });
+        assertHttp(loteManual, 201, "Producción sin receta con costo manual");
+        const loteManualId = loteManual.json?.data?.id;
+        assert.ok(loteManualId);
+
+        const loteManualDb = await prisma.lotes_produccion.findUnique({
+          where: { id: loteManualId },
+          include: { lotes_produccion_items: true },
+        });
+        const productoManualDb = await prisma.productos.findUnique({
+          where: { id: productoManualId },
+          select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+        });
+        assert.equal(Number(loteManualDb.costo_total), 30);
+        assert.equal(Number(loteManualDb.lotes_produccion_items[0].costo_unitario), 15);
+        assert.equal(Number(productoManualDb.stock_actual), 2);
+        assert.equal(Number(productoManualDb.costo_promedio), 15);
+        assert.equal(productoManualDb.costo_promedio_estado, "historico_calculado");
+        assert.equal(Number((await prisma.insumos.findUnique({ where: { id: insumoId }, select: { stock_actual: true } })).stock_actual), stockInsumoAntesManual,
+          "Un producto sin receta debe ignorar insumos_reales y conservar el costo manual.");
+        assert.equal(await prisma.movimientos_insumos.count({ where: { insumos_id: insumoId } }), movimientosInsumoAntesManual);
+
+        const anularLoteManual = await request("DELETE", `/api/produccion/${loteManualId}`, {
+          routeKey: "/api/produccion/:id",
+          token: adminToken,
+          body: { motivo: "Anular lote de costo manual de la suite" },
+        });
+        assertHttp(anularLoteManual, 200, "Anular lote de producto sin receta");
+        const productoManualTrasAnular = await prisma.productos.findUnique({
+          where: { id: productoManualId },
+          select: { stock_actual: true, costo_promedio: true, costo_promedio_estado: true },
+        });
+        assert.equal(Number(productoManualTrasAnular.stock_actual), 0);
+        assert.equal(productoManualTrasAnular.costo_promedio, null);
+        assert.equal(productoManualTrasAnular.costo_promedio_estado, "sin_costo_verificable");
+        assert.equal(Number((await prisma.insumos.findUnique({ where: { id: insumoId }, select: { stock_actual: true } })).stock_actual), stockInsumoAntesManual);
+      });
     });
 
     await testConDiagnostico(t, "Clientes, saldos a favor y deudas de ventas", async (tClientes) => {
