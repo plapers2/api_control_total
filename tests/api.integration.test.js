@@ -14,6 +14,7 @@ import {
   obtenerDiagnosticoSuite,
   instrumentarPrismaParaSuite,
 } from "./helpers/runtime.js";
+import { iniciarWatchdogSuite } from "./helpers/watchdog.js";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p5sAAAAASUVORK5CYII=";
 const prisma = instrumentarPrismaParaSuite(prismaOriginal);
@@ -22,88 +23,6 @@ const traceSuite = (message) => {
   registrarFaseSuite(message);
   if (process.env.SUITE_TRACE === "1") process.stderr.write(`[suite-trace] ${message}\n`);
 };
-
-function iniciarWatchdogSuite(getEntorno) {
-  const intervalMs = Number(process.env.SUITE_WATCHDOG_INTERVAL_MS) > 0
-    ? Number(process.env.SUITE_WATCHDOG_INTERVAL_MS)
-    : 10_000;
-  const warningMs = Number(process.env.SUITE_WATCHDOG_WARNING_MS) > 0
-    ? Number(process.env.SUITE_WATCHDOG_WARNING_MS)
-    : 25_000;
-
-  let expectedTick = Date.now() + intervalMs;
-  let ultimaAlerta = "";
-
-  const timer = setInterval(() => {
-    const now = Date.now();
-    const retrasoEventLoopMs = Math.max(0, now - expectedTick);
-    expectedTick = now + intervalMs;
-
-    const estado = obtenerDiagnosticoSuite();
-    const fase = estado.fase?.nombre ?? "Fase no registrada";
-    const sinAvanceMs = estado.fase?.iniciadaEn
-      ? now - estado.fase.iniciadaEn
-      : 0;
-
-    // No llena la consola cuando todo avanza normalmente: informa solo si
-    // la fase actual lleva al menos un intervalo sin registrar progreso.
-    if (sinAvanceMs < intervalMs) return;
-
-    const activos = estado.peticionesActivas ?? [];
-    const entorno = getEntorno();
-    const procesoApi = entorno?.server?.child;
-    const estadoApi = !procesoApi
-      ? "API de pruebas aún no disponible"
-      : procesoApi.exitCode !== null
-        ? `API de pruebas finalizó con código ${procesoApi.exitCode}`
-        : procesoApi.signalCode
-          ? `API de pruebas terminó por señal ${procesoApi.signalCode}`
-          : `API de pruebas activa en ${entorno.server.baseUrl}`;
-
-    const operacionesPrisma = estado.operacionesPrismaActivas ?? [];
-    const ultimaHttp = estado.ultimaPeticionHttp;
-    const ultimaPrisma = estado.ultimaOperacionPrisma;
-    const diagnosticoHttp = activos.length
-      ? `HTTP pendiente: ${activos.map((item) => `${item.method} ${item.path} (${((now - item.iniciadaEn) / 1000).toFixed(1)} s; límite ${item.timeoutMs} ms)`).join("; ")}. `
-      : `Sin HTTP pendiente${ultimaHttp ? `; última petición: ${ultimaHttp.method} ${ultimaHttp.path} ${ultimaHttp.resultado} (${ultimaHttp.duracionMs} ms)` : ""}. `;
-    const diagnosticoPrisma = operacionesPrisma.length
-      ? `Prisma pendiente: ${operacionesPrisma.map((item) => `${item.nombre} (${(item.duracionMs / 1000).toFixed(1)} s)`).join("; ")}. `
-      : `Sin operación Prisma pendiente${ultimaPrisma ? `; última operación: ${ultimaPrisma.nombre} ${ultimaPrisma.resultado} (${ultimaPrisma.duracionMs} ms)` : ""}. `;
-
-    process.stderr.write(
-      `[suite-watchdog] SIN AVANCE durante ${(sinAvanceMs / 1000).toFixed(0)} s. ` +
-      `Última fase: ${fase}. ` +
-      diagnosticoHttp +
-      diagnosticoPrisma +
-      `${estadoApi}.` +
-      (retrasoEventLoopMs >= 5_000
-        ? ` Retraso del event loop detectado: ${(retrasoEventLoopMs / 1000).toFixed(1)} s.`
-        : "") +
-      "\n",
-    );
-
-    if (sinAvanceMs >= warningMs) {
-      const claveAlerta = `${fase}:${estado.fase?.iniciadaEn ?? ""}`;
-      if (ultimaAlerta !== claveAlerta) {
-        ultimaAlerta = claveAlerta;
-        process.stderr.write(
-          `[suite-watchdog] ALERTA: la suite superó ${(warningMs / 1000).toFixed(0)} s sin cambiar de fase. ` +
-          "No se puede afirmar la causa raíz solo con el test; la última fase y las peticiones pendientes anteriores indican dónde investigar.\n",
-        );
-        const logsApi = entorno?.server?.getOutput?.() ?? "";
-        if (logsApi) {
-          process.stderr.write(`[suite-watchdog] Última salida de la API de pruebas:\n${logsApi.slice(-4000)}\n`);
-        }
-      }
-    } else {
-      ultimaAlerta = "";
-    }
-  }, intervalMs);
-
-  // El watchdog no debe mantener vivo el proceso si la suite ya terminó.
-  timer.unref();
-  return () => clearInterval(timer);
-}
 
 function testConDiagnostico(contexto, nombre, callback) {
   return contexto.test(nombre, async (contextoHijo) => {
@@ -172,7 +91,10 @@ test("Suite integral de endpoints de Control Total", async (t) => {
 
   try {
     traceSuite("Preparando fixtures y verificando entorno de pruebas");
-    detenerWatchdog = iniciarWatchdogSuite(() => entorno);
+    detenerWatchdog = iniciarWatchdogSuite({
+      obtenerDiagnosticoSuite,
+      obtenerEntorno: () => entorno,
+    });
     entorno = await crearEntornoPruebas();
     traceSuite("Fixtures creados y API aislada disponible");
     const request = crearClienteApi(entorno, cobertura);

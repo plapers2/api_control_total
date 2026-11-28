@@ -59,3 +59,13 @@ Además de la cobertura de rutas y permisos, la suite verifica tres escenarios t
 - Una venta con dos líneas del mismo producto que, en conjunto, exceden el stock: debe rechazarse y revertir encabezado, líneas, stock y cualquier efecto asociado en Caja, pagos y Fondo.
 
 Estos casos comprueban escenarios específicos de concurrencia y rollback; no representan una prueba exhaustiva de todas las intercalaciones concurrentes posibles ni de todos los fallos de infraestructura.
+
+## Autoprueba del watchdog (sin base de datos)
+
+Para comprobar deliberadamente las alertas del watchdog sin abrir MariaDB ni arrancar Express, ejecutar:
+
+```powershell
+node --test tests/watchdog.selftest.js
+```
+
+Esta autoprueba simula una fase pausada con una petición HTTP y una operación Prisma pendientes. Usa intervalos reducidos solo en memoria, captura la salida del watchdog y verifica que reporte la fase, HTTP, Prisma, estado simulado de la API y alerta. No importa el cliente Prisma ni crea fixtures.

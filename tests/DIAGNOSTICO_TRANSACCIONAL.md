@@ -47,3 +47,7 @@ Write-Output "Código de salida: $codigo"
 ```
 
 Si una ejecución se interrumpe externamente con `Ctrl+C` o se termina Node desde Windows, la limpieza automática puede no ejecutarse. Verificar por `runId` los registros temporales antes de repetir el test.
+
+## Verificación artificial del watchdog sin BD
+
+Ejecutar `node --test tests/watchdog.selftest.js`. Esta autoprueba importa únicamente `tests/helpers/watchdog.js`, simula una fase inmóvil y verifica la salida diagnóstica. No carga `src/db/prisma.js`, no abre conexiones y no crea ni elimina datos.
